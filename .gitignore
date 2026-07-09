@@ -18,6 +18,10 @@ lib/
 lib64/
 parts/
 sdist/
+# Monorepo guard: these Python packaging names must NOT swallow the Next.js
+# frontend's own source folders (it has a TypeScript lib/).
+!frontend/lib/
+!frontend/lib/**
 var/
 wheels/
 share/python-wheels/
