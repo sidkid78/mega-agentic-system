@@ -1,0 +1,18 @@
+# Render Blueprint — deploys the FastAPI backend as a Docker web service.
+#
+# Bring-your-own-key: the server holds NO Gemini key. Each request carries the
+# user's key in the X-Gemini-Key header (or ?key= on WebSockets), so there is no
+# secret to configure here.
+#
+# To deploy: push this repo to GitHub, then in Render → "New +" → "Blueprint",
+# point it at the repo. Render reads this file and creates the service.
+services:
+  - type: web
+    name: mega-agentic-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free            # free tier spins down when idle (~50s cold start); bump to "starter" to keep warm
+    healthCheckPath: /health
+    autoDeploy: true
+    # No envVars: BYOK means the backend needs no GEMINI_API_KEY.

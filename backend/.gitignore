@@ -1,0 +1,37 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local env / secrets
+.env
+.env.*
+
+# Runtime / generated artifacts
+logs/
+*.pkl
+generated_image.png
+types_output.txt
+
+# Local workspaces & scratch output
+scratch/
+workspace/
+workspace_f/
+quick_test_workspace/
+showcase_assets/
+showcase2_assets/
+
+# Scratch notes & demo exports
+build_log.md
+plan.md
+relevant_files.md
+sub_tracker.md
+code_generaton_demo.md
+code_generaton_demo.html
+test_missing_data.csv

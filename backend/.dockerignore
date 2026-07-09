@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.git/
+.gitignore
+Dockerfile
+.dockerignore
+# runtime state / local artifacts — should not bake into the image
+mega_system_state.pkl
+*.log
+*.pkl
+.env
+.env.*

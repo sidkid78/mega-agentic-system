@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mega Agentic System Dossier</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;700&family=Space+Grotesk:wght@300;500;700&display=swap');
+
+  :root {
+    --bg: #030303;
+    --surface: #0a0a0a;
+    --surface-glass: rgba(10, 10, 10, 0.85);
+    --text-main: #e0e0e0;
+    --text-muted: #888888;
+    --accent: #00f0ff;
+    --accent-dim: rgba(0, 240, 255, 0.1);
+    --warning: #ffcc00;
+    --grid: rgba(255, 255, 255, 0.05);
+    --font-head: 'Space Grotesk', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background-color: #000;
+    color: var(--text-main);
+    font-family: var(--font-mono);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* SVG Filters */
+  .svg-filters {
+    position: absolute;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+  }
+
+  /* Main Card Container */
+  .dossier-card {
+    width: 100%;
+    max-width: 480px;
+    background: var(--bg);
+    border-left: 1px solid var(--grid);
+    border-right: 1px solid var(--grid);
+    position: relative;
+    box-shadow: 0 0 50px rgba(0, 240, 255, 0.05);
+  }
+
+  /* Background Texture Layer */
+  .noise-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 50;
+    pointer-events: none;
+    opacity: 0.07;
+    filter: url(#noise);
+  }
+
+  /* Header / HUD */
+  header.hud {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    background: var(--bg);
+    border-bottom: 1px solid var(--accent);
+    padding: 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+  }
+
+  .status-light {
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--accent);
+    animation: pulse 2s infinite;
+  }
+
+  /* Image Handling */
+  .visual-anchor {
+    width: 100%;
+    height: 250px;
+    position: relative;
+    overflow: hidden;
+    border-bottom: 1px solid var(--grid);
+  }
+  
+  .visual-anchor img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: grayscale(100%) contrast(1.2) brightness(0.7);
+    mix-blend-mode: luminosity;
+    transition: all 0.5s ease;
+  }
+
+  .visual-anchor::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, transparent 0%, var(--bg) 100%);
+    z-index: 2;
+  }
+
+  .visual-anchor::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: var(--accent-dim);
+    mix-blend-mode: overlay;
+    z-index: 3;
+  }
+
+  /* Typography */
+  h1 {
+    font-family: var(--font-head);
+    font-size: 2.5rem;
+    line-height: 0.9;
+    text-transform: uppercase;
+    margin: 2rem 1rem;
+    letter-spacing: -0.02em;
+  }
+
+  h2 {
+    font-family: var(--font-head);
+    font-size: 1.25rem;
+    color: var(--accent);
+    margin-bottom: 1rem;
+    text-transform: uppercase;
+    border-left: 3px solid var(--accent);
+    padding-left: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  p {
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+  }
+
+  .section-block {
+    padding: 2rem 1.5rem;
+    border-bottom: 1px solid var(--grid);
+    position: relative;
+  }
+
+  /* Data Visualization Components */
+  .mode-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-top: 1.5rem;
+  }
+
+  .mode-item {
+    background: rgba(255,255,255,0.03);
+    padding: 0.75rem;
+    border: 1px solid var(--grid);
+    font-size: 0.7rem;
+    transition: background 0.3s;
+  }
+
+  .mode-item strong {
+    display: block;
+    color: var(--text-main);
+    margin-bottom: 0.2rem;
+    font-family: var(--font-head);
+  }
+
+  .mode-item:hover {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+  }
+
+  .metric-bar {
+    height: 4px;
+    background: var(--grid);
+    margin-top: 0.5rem;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .metric-fill {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 1s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .tag-cloud {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 1rem;
+  }
+
+  .tag {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid var(--text-muted);
+    color: var(--text-muted);
+  }
+
+  .complex-list li {
+    list-style: none;
+    position: relative;
+    padding-left: 1.2rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+
+  .complex-list li::before {
+    content: '>';
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+  }
+
+  /* Animation States */
+  .reveal {
+    opacity: 0;
+    transform: translateY(20px);
+    transition: all 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .reveal.active {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .glitch-text {
+    position: relative;
+  }
+
+  @keyframes pulse {
+    0% { opacity: 1; box-shadow: 0 0 0px var(--accent); }
+    50% { opacity: 0.5; box-shadow: 0 0 10px var(--accent); }
+    100% { opacity: 1; box-shadow: 0 0 0px var(--accent); }
+  }
+
+  /* Footer */
+  footer {
+    padding: 3rem 1.5rem;
+    background: var(--surface);
+    text-align: center;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    border-top: 1px solid var(--accent);
+  }
+
+  .btn-download {
+    display: inline-block;
+    margin-top: 1rem;
+    padding: 0.8rem 2rem;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: bold;
+    background: rgba(0, 240, 255, 0.05);
+    cursor: pointer;
+  }
+
+</style>
+</head>
+<body>
+
+<!-- SVG Filters definition -->
+<svg class="svg-filters">
+  <defs>
+    <filter id="noise">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="3" stitchTiles="stitch" />
+      <feColorMatrix type="saturate" values="0" />
+    </filter>
+  </defs>
+</svg>
+
+<div class="noise-overlay"></div>
+
+<main class="dossier-card">
+  
+  <!-- Sticky HUD -->
+  <header class="hud">
+    <span>Sys.Orch // v4.0</span>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <span>Online</span>
+      <div class="status-light"></div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <div class="visual-anchor">
+    <img src="./images/scene-1 (24).jpg" alt="Mega Agentic System">
+  </div>
+
+  <section class="section-block">
+    <h1 class="reveal">Unified Framework for Advanced Agentic Orchestration</h1>
+    <p class="reveal" style="transition-delay: 100ms; font-size: 0.95rem; color: var(--text-main);">
+      An expansive architectural framework for a "Mega Agentic System". Moves beyond single-prompt interactions toward multi-pattern orchestration via Google’s Gemini and Imagen models.
+    </p>
+    <div class="tag-cloud reveal" style="transition-delay: 200ms;">
+      <span class="tag">Gemini</span>
+      <span class="tag">Imagen</span>
+      <span class="tag">Swarm</span>
+      <span class="tag">Orchestration</span>
+    </div>
+  </section>
+
+  <!-- Section 1: Modes -->
+  <section class="section-block">
+    <h2 class="reveal">01 // Agent Modes</h2>
+    <p class="reveal">The MegaAgenticSystem intelligently selects operational modes based on task complexity.</p>
+    
+    <div class="mode-grid reveal" style="transition-delay: 100ms;">
+      <div class="mode-item">
+        <strong>HIERARCHICAL</strong>
+        Sub-task decomposition for complex planning.
+      </div>
+      <div class="mode-item">
+        <strong>SWARM</strong>
+        Collective intelligence for creative search.
+      </div>
+      <div class="mode-item">
+        <strong>DEBATE</strong>
+        Adversarial reasoning for strategy.
+      </div>
+      <div class="mode-item">
+        <strong>RED/BLUE</strong>
+        Iterative attack and defense hardening.
+      </div>
+    </div>
+
+    <div class="reveal" style="margin-top: 1.5rem; border: 1px solid var(--grid); padding: 1rem;">
+      <div style="font-size: 0.65rem; text-transform: uppercase; margin-bottom: 0.5rem;">System Self-Optimization</div>
+      <p style="font-size: 0.75rem; margin-bottom: 0.5rem;">Tracks performance metrics per mode (quality, success rate).</p>
+      <div class="metric-bar"><div class="metric-fill" style="width: 88%"></div></div>
+    </div>
+  </section>
+
+  <!-- Section 2: Code Lifecycle -->
+  <div class="visual-anchor">
+    <img src="./images/scene-2 (25).jpg" alt="Robotic Automation">
+  </div>
+
+  <section class="section-block">
+    <h2 class="reveal">02 // Code Lifecycle</h2>
+    <p class="reveal">Comprehensive suite for development from generation to safe execution.</p>
+    
+    <ul class="complex-list reveal" style="transition-delay: 100ms;">
+      <li><strong>Structured Generation:</strong> Metadata, complexity assessments, dependency lists.</li>
+      <li><strong>Review & Refactoring:</strong> Security analysis and performance bottleneck identification.</li>
+      <li><strong>Lifecycle Tools:</strong> Translation (Python to TS), Logic Summaries, Auto-generated Unit Tests.</li>
+      <li><strong>Safe Execution:</strong> Timeout protection with stdout/stderr capture.</li>
+    </ul>
+  </section>
+
+  <!-- Section 3: Documents & Data -->
+  <div class="visual-anchor">
+    <img src="./images/scene-4 (21).jpg" alt="Document Analysis">
+  </div>
+
+  <section class="section-block">
+    <h2 class="reveal">03 // Doc & Analysis</h2>
+    <p class="reveal">High-fidelity document generation ranging from summaries to 5,000+ word reports.</p>
+    
+    <div class="reveal" style="background: var(--surface-glass); border-left: 2px solid var(--warning); padding: 1rem; margin: 1rem 0;">
+      <strong style="color: var(--warning); font-family: var(--font-head); text-transform:uppercase; font-size:0.8rem;">Scout-Plan-Build Workflow</strong>
+      <p style="margin-top:0.5rem; font-size:0.75rem;">
+        1. Scout Agent maps "treasure map" of files.<br>
+        2. Planner Agent synthesizes "master blueprint".<br>
+        3. Builder Agent executes with high precision.
+      </p>
+    </div>
+
+    <p class="reveal"><strong>RAG System:</strong> Uses vector embeddings (gemini-embedding-001) to index and retrieve context, minimizing hallucination.</p>
+  </section>
+
+  <!-- Section 4: Architecture -->
+  <div class="visual-anchor">
+    <img src="./images/scene-5.jpg" alt="System Dashboard">
+  </div>
+
+  <section class="section-block">
+    <h2 class="reveal">04 // System Arch</h2>
+    <p class="reveal">Deployed as a unified platform via FastAPI integration.</p>
+    
+    <div class="mode-grid reveal" style="transition-delay: 100ms;">
+      <div class="mode-item">
+        <strong>Background Tasks</strong>
+        Async multi-agent execution.
+      </div>
+      <div class="mode-item">
+        <strong>Metric Monitoring</strong>
+        Real-time health insights.
+      </div>
+    </div>
+    
+    <div style="margin-top: 1.5rem; padding-top:1rem; border-top:1px dashed var(--text-muted);" class="reveal">
+      <strong style="color: var(--accent); font-size: 0.8rem;">AI-Driven CSV Analysis</strong>
+      <p style="font-size: 0.75rem; margin-top: 0.5rem;">Scans datasets for missing values. Generates context-aware questions to fill data gaps using surrounding row values.</p>
+    </div>
+  </section>
+
+  <footer>
+    <div>END OF DOSSIER</div>
+    <div style="margin: 1rem 0; font-family: var(--font-head); font-size: 1.5rem; letter-spacing: -0.05em; color: var(--text-main);">MEGA AGENTIC SYSTEM</div>
+    <div class="btn-download">Initialize Protocol</div>
+  </footer>
+
+</main>
+
+<script>
+  // Intersection Observer for Scroll Reveals
+  const observerOptions = {
+    root: null,
+    rootMargin: '0px',
+    threshold: 0.1
+  };
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('active');
+        // Animate metric bars if found within
+        const bars = entry.target.querySelectorAll('.metric-fill');
+        bars.forEach(bar => {
+          bar.style.width = bar.getAttribute('style').match(/width:\s*(\d+%)/)[1];
+        });
+      }
+    });
+  }, observerOptions);
+
+  document.querySelectorAll('.reveal').forEach(el => {
+    observer.observe(el);
+  });
+
+  // Initial Metric Bar Reset for Animation
+  document.querySelectorAll('.metric-fill').forEach(bar => {
+    // Store target width in style but reset to 0 for animation
+    const target = bar.style.width;
+    bar.style.width = '0%';
+    // Restore happens in observer
+    bar.setAttribute('style', `width: ${target}`);
+  });
+
+</script>
+
+</body>
+</html>

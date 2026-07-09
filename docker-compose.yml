@@ -1,0 +1,39 @@
+# Mega Agentic System — full stack (backend + frontend)
+#
+# Bring-your-own-key: users enter their own Gemini key in the UI, so no key is
+# required to run the stack. A GEMINI_API_KEY in .env is optional and only acts
+# as a local-dev fallback for the few endpoints not yet BYOK-wired.
+#
+# Quick start:
+#   1. docker compose up --build        (optionally: cp .env.example .env first)
+#   2. open http://localhost:3000       (backend API at http://localhost:8010)
+#   3. click "Add API Key" (bottom-right) and paste your Gemini key
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8010:8010"
+    environment:
+      # Optional under BYOK — empty is fine; the UI supplies the key per request.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the client bundle at build time; the browser uses this to
+        # reach the backend, so keep it host-reachable (default = localhost).
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8010}
+    ports:
+      # Host port is configurable (set FRONTEND_PORT in .env if 3000 is taken).
+      # The container still serves on 3000 internally; only the host side changes.
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      # Optional under BYOK — the /videos and nano-banana routes now read the
+      # user's key from the request, not the environment.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    depends_on:
+      - backend
+    restart: unless-stopped
