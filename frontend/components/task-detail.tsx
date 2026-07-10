@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { apiClient, ApiError, type TaskResponse, type LogEvent, type AgentCard, type TaskLogs } from "@/lib/api"
-import { Loader2, CheckCircle2, XCircle, Clock } from "lucide-react"
+import { Loader2, CheckCircle2, XCircle, Clock, ChevronRight } from "lucide-react"
 import { MarkdownRenderer } from "@/components/markdown-renderer"
 
 interface TaskDetailProps {
@@ -82,7 +82,17 @@ export function TaskDetail({ taskId }: TaskDetailProps) {
   const [logs, setLogs] = useState<LogEvent[]>([])
   const [agents, setAgents] = useState<AgentCard[]>([])
   const [loading, setLoading] = useState(true)
+  // Which timeline events are expanded to show the full agent message.
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const timelineRef = useRef<HTMLDivElement>(null)
+
+  const toggleEvent = (i: number) =>
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      return next
+    })
 
   // ── fetch logs (only when we know the task exists) ──
   const fetchLogs = async () => {
@@ -348,22 +358,52 @@ export function TaskDetail({ taskId }: TaskDetailProps) {
               ref={timelineRef}
               className="max-h-80 overflow-y-auto px-4 pb-4 space-y-1.5 scroll-smooth"
             >
-              {logs.map((event, i) => (
-                <div
-                  key={i}
-                  className={`flex gap-3 rounded-lg border px-3 py-2 text-xs transition-all animate-in fade-in duration-300 ${eventColor(event.event_type)}`}
-                >
-                  <span className="text-base leading-none mt-0.5 flex-shrink-0">{eventIcon(event.event_type)}</span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-zinc-800 dark:text-zinc-200 leading-snug whitespace-pre-wrap break-words">
-                      {event.message}
-                    </p>
-                    <p className="text-zinc-400 dark:text-zinc-500 mt-0.5 font-mono">
-                      {shortTime(event.timestamp)}
-                    </p>
+              {logs.map((event, i) => {
+                const isExpandable = event.message.length > 100 || event.message.includes("\n")
+                const isOpen = expanded.has(i)
+                return (
+                  <div
+                    key={i}
+                    onClick={isExpandable ? () => toggleEvent(i) : undefined}
+                    role={isExpandable ? "button" : undefined}
+                    tabIndex={isExpandable ? 0 : undefined}
+                    onKeyDown={
+                      isExpandable
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault()
+                              toggleEvent(i)
+                            }
+                          }
+                        : undefined
+                    }
+                    className={`flex gap-3 rounded-lg border px-3 py-2 text-xs transition-all animate-in fade-in duration-300 ${eventColor(event.event_type)} ${
+                      isExpandable ? "cursor-pointer hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-indigo-500/50" : ""
+                    }`}
+                  >
+                    {isExpandable ? (
+                      <ChevronRight
+                        className={`h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-zinc-400 transition-transform ${isOpen ? "rotate-90" : ""}`}
+                      />
+                    ) : (
+                      <span className="text-base leading-none mt-0.5 flex-shrink-0">{eventIcon(event.event_type)}</span>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className={`text-zinc-800 dark:text-zinc-200 leading-snug break-words ${
+                          isOpen ? "whitespace-pre-wrap" : "line-clamp-2"
+                        }`}
+                      >
+                        {event.message}
+                      </p>
+                      <p className="text-zinc-400 dark:text-zinc-500 mt-0.5 font-mono">
+                        {shortTime(event.timestamp)}
+                        {isExpandable && !isOpen && <span className="ml-2 text-indigo-400">· tap to expand</span>}
+                      </p>
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
               {isRunning && (
                 <div className="flex items-center gap-2 text-xs text-zinc-400 px-3 py-2">
                   <Loader2 className="h-3 w-3 animate-spin" />
