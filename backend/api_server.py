@@ -1445,11 +1445,8 @@ async def validate_code_endpoint(request: CodeValidateRequest):
 
 @app.post("/research/query")
 async def research_query_endpoint(request: ResearchRequest, gemini_key: str = Depends(get_gemini_key)):
-    """Process research platform queries (BYOK: built per-request from the caller's key)."""
-    try:
-        research_platform = AIResearchPlatform(api_key=gemini_key)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to initialize research platform: {e}")
+    """Process research platform queries (BYOK: uses the caller's cached platform)."""
+    research_platform = _get_platform(gemini_key)
 
     try:
         if request.request_type == "research":
@@ -1562,19 +1559,39 @@ class RagAnswerRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
 
 
-def _require_rag():
-    if not research_platform or research_platform.rag is None:
+# Per-key cache of research platforms (BYOK). Building an AIResearchPlatform is
+# heavy (RAG + orchestrator + assistant), and RAG's knowledge base and the
+# assistant's chat history live in-memory on the instance — so we cache one per
+# API key. State persists across requests for the same user while the server is
+# warm; it resets on restart/cold-start, which is fine.
+_platform_cache: Dict[str, AIResearchPlatform] = {}
+
+
+def _get_platform(gemini_key: str) -> AIResearchPlatform:
+    platform = _platform_cache.get(gemini_key)
+    if platform is None:
+        try:
+            platform = AIResearchPlatform(api_key=gemini_key)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Research platform init failed: {e}")
+        _platform_cache[gemini_key] = platform
+    return platform
+
+
+def _require_rag(gemini_key: str):
+    rag = _get_platform(gemini_key).rag
+    if rag is None:
         raise HTTPException(
             status_code=503,
-            detail="RAG system unavailable. Check GEMINI_API_KEY.",
+            detail="RAG system unavailable for this API key (file search may not be enabled on it).",
         )
-    return research_platform.rag
+    return rag
 
 
 @app.post("/rag/documents")
-async def rag_add_documents(request: RagAddDocumentsRequest):
+async def rag_add_documents(request: RagAddDocumentsRequest, gemini_key: str = Depends(get_gemini_key)):
     """Chunk, embed, and add documents to the RAG knowledge base."""
-    rag = _require_rag()
+    rag = _require_rag(gemini_key)
     try:
         added = rag.add_documents(request.documents, titles=request.titles, sources=request.sources)
         stats = rag.stats()
@@ -1584,16 +1601,16 @@ async def rag_add_documents(request: RagAddDocumentsRequest):
 
 
 @app.get("/rag/documents")
-async def rag_stats():
+async def rag_stats(gemini_key: str = Depends(get_gemini_key)):
     """Return current RAG KB stats."""
-    rag = _require_rag()
+    rag = _require_rag(gemini_key)
     return rag.stats()
 
 
 @app.delete("/rag/documents")
-async def rag_clear():
+async def rag_clear(gemini_key: str = Depends(get_gemini_key)):
     """Clear the in-memory RAG KB."""
-    rag = _require_rag()
+    rag = _require_rag(gemini_key)
     rag.documents = []
     rag.embeddings = []
     return {"success": True, "document_count": 0}
@@ -1604,9 +1621,10 @@ async def rag_upload_pdf(
     file: UploadFile = File(...),
     title: str = Form(default=""),
     source: str = Form(default=""),
+    gemini_key: str = Depends(get_gemini_key),
 ):
     """Upload a PDF, extract + chunk + embed its content into the RAG KB."""
-    rag = _require_rag()
+    rag = _require_rag(gemini_key)
     try:
         pdf_bytes = await file.read()
         added = rag.add_pdf(pdf_bytes, title=title or file.filename or "", source=source)
@@ -1617,9 +1635,9 @@ async def rag_upload_pdf(
 
 
 @app.post("/rag/retrieve")
-async def rag_retrieve(request: RagRetrievalRequest):
+async def rag_retrieve(request: RagRetrievalRequest, gemini_key: str = Depends(get_gemini_key)):
     """Retrieve the top-k matching chunks with similarity scores."""
-    rag = _require_rag()
+    rag = _require_rag(gemini_key)
     try:
         results = rag.query(request.query, top_k=request.top_k, min_score=request.min_score)
         return {"success": True, "results": results}
@@ -1628,9 +1646,9 @@ async def rag_retrieve(request: RagRetrievalRequest):
 
 
 @app.post("/rag/answer")
-async def rag_answer(request: RagAnswerRequest):
+async def rag_answer(request: RagAnswerRequest, gemini_key: str = Depends(get_gemini_key)):
     """Answer a question with RAG-augmented generation, returning sources."""
-    rag = _require_rag()
+    rag = _require_rag(gemini_key)
     try:
         result = rag.answer_question(request.question, top_k=request.top_k)
         return {"success": True, "answer": result["answer"], "sources": result["sources"]}
@@ -2113,22 +2131,24 @@ class ScoutPlanBuildRequest(BaseModel):
     documentation_urls: Optional[List[str]] = None
 
 
-def _require_orchestrator():
-    if not research_platform or research_platform.orchestrator is None:
-        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
-    return research_platform.orchestrator
+def _require_orchestrator(gemini_key: str):
+    orch = _get_platform(gemini_key).orchestrator
+    if orch is None:
+        raise HTTPException(status_code=503, detail="Orchestrator unavailable for this API key")
+    return orch
 
 
-def _require_assistant():
-    if not research_platform or research_platform.assistant is None:
-        raise HTTPException(status_code=503, detail="Research assistant not initialized")
-    return research_platform.assistant
+def _require_assistant(gemini_key: str):
+    assistant = _get_platform(gemini_key).assistant
+    if assistant is None:
+        raise HTTPException(status_code=503, detail="Research assistant unavailable for this API key")
+    return assistant
 
 
 @app.post("/orchestrators/agentic")
-async def orchestrator_execute(request: OrchestratorTaskRequest):
+async def orchestrator_execute(request: OrchestratorTaskRequest, gemini_key: str = Depends(get_gemini_key)):
     """Run a one-shot task through the AgenticOrchestrator (tool-using Gemini agent)."""
-    orch = _require_orchestrator()
+    orch = _require_orchestrator(gemini_key)
     try:
         result = orch.execute_task(request.task)
         return {"success": True, "result": result}
@@ -2137,9 +2157,9 @@ async def orchestrator_execute(request: OrchestratorTaskRequest):
 
 
 @app.post("/orchestrators/agentic/stream")
-async def orchestrator_execute_stream(request: OrchestratorTaskRequest):
+async def orchestrator_execute_stream(request: OrchestratorTaskRequest, gemini_key: str = Depends(get_gemini_key)):
     """Stream a research response as the orchestrator generates it."""
-    orch = _require_orchestrator()
+    orch = _require_orchestrator(gemini_key)
 
     def event_stream():
         try:
@@ -2153,9 +2173,9 @@ async def orchestrator_execute_stream(request: OrchestratorTaskRequest):
 
 
 @app.post("/orchestrators/assistant/chat")
-async def assistant_chat(request: AssistantChatRequest):
+async def assistant_chat(request: AssistantChatRequest, gemini_key: str = Depends(get_gemini_key)):
     """Send a message to the persistent ResearchAssistant chat session."""
-    assistant = _require_assistant()
+    assistant = _require_assistant(gemini_key)
     try:
         response = assistant.send_message(request.message)
         return {"success": True, "response": response}
@@ -2164,9 +2184,9 @@ async def assistant_chat(request: AssistantChatRequest):
 
 
 @app.get("/orchestrators/assistant/history")
-async def assistant_history():
+async def assistant_history(gemini_key: str = Depends(get_gemini_key)):
     """Return the conversation history of the persistent assistant."""
-    assistant = _require_assistant()
+    assistant = _require_assistant(gemini_key)
     try:
         return {"history": assistant.get_history()}
     except Exception as e:
@@ -2174,14 +2194,12 @@ async def assistant_history():
 
 
 @app.post("/orchestrators/assistant/reset")
-async def assistant_reset():
-    """Start a fresh ResearchAssistant chat session."""
-    global research_platform
-    if not research_platform:
-        raise HTTPException(status_code=503, detail="Research platform not initialized")
+async def assistant_reset(gemini_key: str = Depends(get_gemini_key)):
+    """Start a fresh ResearchAssistant chat session (for this API key)."""
     try:
         from research_assistant import ResearchAssistant
-        research_platform.assistant = ResearchAssistant(research_platform.client)
+        platform = _get_platform(gemini_key)
+        platform.assistant = ResearchAssistant(platform.client)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

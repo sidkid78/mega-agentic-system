@@ -263,7 +263,7 @@ export default function ImagesPage() {
         </div>
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-5">
+          <TabsList className="grid w-full grid-cols-3 sm:grid-cols-5">
             <TabsTrigger value="generate">Generate</TabsTrigger>
             <TabsTrigger value="edit">Edit</TabsTrigger>
             <TabsTrigger value="reference">Reference</TabsTrigger>
@@ -913,7 +913,7 @@ export default function ImagesPage() {
                       <label className="text-sm font-medium">
                         Reference Images (up to {nbModel === "gemini-3.1-flash-image-preview" ? "10 objects + 4 characters" : "5 characters + 6 objects"})
                       </label>
-                      <div className="grid grid-cols-5 gap-2">
+                      <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
                         {nbRefImages.map((img, idx) => (
                           <div key={idx} className="space-y-1">
                             <ImageUploader

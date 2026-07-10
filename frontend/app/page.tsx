@@ -31,15 +31,15 @@ export default function Home() {
       <div className="relative z-10 container mx-auto px-4 py-8 max-w-7xl">
         <div className="mb-12 flex items-center justify-between">
           <div className="space-y-2">
-            <h1 className="text-5xl md:text-6xl font-bold tracking-tight gradient-text mb-2">
+            <h1 className="text-3xl sm:text-5xl md:text-6xl font-bold tracking-tight gradient-text mb-2">
               MEGA AGENTIC SYSTEM
             </h1>
             <div className="flex items-center gap-3">
-              <div className="h-1 w-12 bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-full" />
-              <p className="text-lg md:text-xl text-zinc-700 dark:text-zinc-300 font-medium">
+              <div className="hidden sm:block h-1 w-12 bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-full" />
+              <p className="text-base sm:text-lg md:text-xl text-zinc-700 dark:text-zinc-300 font-medium">
                 Ultimate Multi-Pattern AI Orchestration Platform
               </p>
-              <div className="h-1 w-12 bg-gradient-to-r from-emerald-500 to-blue-500 rounded-full" />
+              <div className="hidden sm:block h-1 w-12 bg-gradient-to-r from-emerald-500 to-blue-500 rounded-full" />
             </div>
             <div className="flex items-center gap-2 mt-4">
               <div className="px-3 py-1 rounded-full bg-indigo-500/20 dark:bg-indigo-500/30 border border-indigo-500/50">
