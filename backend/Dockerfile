@@ -17,6 +17,12 @@ RUN uv sync --frozen --no-dev --no-install-project
 # Copy the application source.
 COPY . .
 
+# Bake the git commit into the image so /health can report what's deployed.
+# Render passes this automatically (see render.yaml); local builds can override:
+#   docker build --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) ...
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=$GIT_COMMIT
+
 ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8010

@@ -540,12 +540,36 @@ async def root():
     }
 
 
+def _resolve_commit() -> str:
+    """Best-effort git commit of the running build, for verifying what's deployed.
+
+    Render injects RENDER_GIT_COMMIT at runtime; a Docker build can pass GIT_COMMIT
+    (see Dockerfile ARG). Falls back to reading local git for dev runs.
+    """
+    commit = _os.environ.get("RENDER_GIT_COMMIT") or _os.environ.get("GIT_COMMIT")
+    if commit:
+        return commit[:12]
+    try:
+        import subprocess
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=_os.path.dirname(_os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+GIT_COMMIT = _resolve_commit()
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "system_initialized": mega_system is not None
+        "system_initialized": mega_system is not None,
+        "commit": GIT_COMMIT,
     }
 
 
