@@ -1,16 +1,28 @@
 from google import genai
 from google.genai import types
-from main import search_arxiv, search_wikipedia, search_pubmed, DEFAULT_MODEL, create_client, research_with_grounding
+from main import (
+    search_arxiv, search_wikipedia, search_pubmed, DEFAULT_MODEL, create_client,
+    research_with_grounding as _research_with_grounding,
+)
 from typing import List, Dict
 
 class ResearchAssistant:
     def __init__(self, client: genai.Client):
-        self.client = client 
+        self.client = client
+
+        # `research_with_grounding` has a `client=None` parameter that the SDK's
+        # automatic function-calling schema generator can't serialize. Expose a
+        # clean (query: str) wrapper and bind the BYOK client here (binding also
+        # avoids the underlying `create_client()` env-key fallback).
+        def research_with_grounding(query: str) -> dict:
+            """Use Google Search grounding for up-to-date information."""
+            return _research_with_grounding(query, client=client)
+
         self.chat = client.chats.create(
             model=DEFAULT_MODEL,
             config=types.GenerateContentConfig(
                 system_instruction="""You are a research assistant with access to
-                academic papers, web search, and knowledge bases. Help users with 
+                academic papers, web search, and knowledge bases. Help users with
                 research tasks, code generation, and document creation""",
                 tools=[search_arxiv, search_wikipedia, search_pubmed, research_with_grounding]
             )
