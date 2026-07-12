@@ -463,11 +463,27 @@ class MegaAgenticSystem:
         response: str,
         score: float | None = None,
     ) -> None:
-        """Print a single agent step with prompt + response to the console."""
+        """Log a single agent step (full prompt + response), then pretty-print it.
+
+        The logger call is unconditional so the step lands in the log file AND is
+        captured per-task by TaskLogHandler in api_server (which feeds the frontend
+        timeline and its expandable agent messages). Previously, when rich was
+        available the step went only to the console — so the log file and the task
+        detail view showed phase headers but never what the agents actually said.
+        """
+        prompt_excerpt = prompt if len(prompt) <= 1200 else prompt[:1200] + " …"
+        step_lines = [
+            f"{step_label} — {role_hint}",
+            "",
+            f"PROMPT:\n{prompt_excerpt}",
+            "",
+            f"RESPONSE:\n{response}",
+        ]
+        if score is not None:
+            step_lines.append(f"\nQuality score: {score:.2f}/10")
+        logger.info("\n".join(step_lines))
+
         if not _RICH_AVAILABLE:
-            logger.info(f"[{step_label}] {role_hint}")
-            logger.info(f"PROMPT: {prompt[:200]}")
-            logger.info(f"RESPONSE: {response[:200]}")
             return
 
         color = "white"
