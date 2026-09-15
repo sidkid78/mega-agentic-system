@@ -91,6 +91,37 @@ export interface AgentCard {
   name: string;
   role: string;
   mode: string;
+  /** Where this agent came from: minted per sub-task, drawn from the shared
+   *  pool, or declared inline by the mode. */
+  origin?: "dynamic" | "pool" | "inline";
+  /** How many steps this agent actually executed. */
+  steps?: number;
+  /** Sub-task ids this agent owned (hierarchical mode). */
+  subtasks?: string[];
+  /** Dependency batch this agent ran in (hierarchical mode). */
+  batch?: number | null;
+}
+
+/** One structured step taken by one agent.
+ *
+ *  Emitted directly by the orchestrator rather than inferred from log text,
+ *  so phase, agent identity and batch are authoritative instead of guessed. */
+export interface AgentEvent {
+  seq: number;
+  timestamp: string;
+  kind: "decompose" | "agent_step" | "synthesis" | "score" | "phase";
+  mode: string;
+  phase: string;
+  agent_name: string | null;
+  agent_role: string | null;
+  agent_origin: "dynamic" | "pool" | "inline" | null;
+  subtask_id: string | null;
+  batch: number | null;
+  depends_on: string[];
+  prompt: string;
+  response: string;
+  score: number | null;
+  duration_ms: number;
 }
 
 export interface TaskLogs {
@@ -98,6 +129,7 @@ export interface TaskLogs {
   status: string;
   logs: LogEvent[];
   agents: AgentCard[];
+  events: AgentEvent[];
 }
 
 export class ApiError extends Error {

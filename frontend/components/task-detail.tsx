@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
-import { apiClient, ApiError, type TaskResponse, type LogEvent, type AgentCard, type TaskLogs } from "@/lib/api"
+import { apiClient, ApiError, type TaskResponse, type LogEvent, type AgentCard, type AgentEvent, type TaskLogs } from "@/lib/api"
 import { Loader2, CheckCircle2, XCircle, Clock, ChevronRight } from "lucide-react"
 import { MarkdownRenderer } from "@/components/markdown-renderer"
 
@@ -48,23 +48,81 @@ function eventColor(type: LogEvent["event_type"]): string {
   return colors[type] ?? "border-zinc-400/30 bg-transparent"
 }
 
+// Agent roles are open-ended now: hierarchical mints them per task ("Security
+// Architect", "Cloud Storage Engineer"), so match on keywords and fall back to
+// a stable hash so every distinct role still gets its own colour.
+const ROLE_KEYWORDS: [RegExp, string, string][] = [
+  [/plan|strateg|lead|principal/i,       "from-indigo-500 to-blue-500",   "\u{1F9E0}"],
+  [/architect|design/i,                  "from-sky-500 to-cyan-500",      "\u{1F4D0}"],
+  [/secur|red team/i,                    "from-rose-500 to-red-600",      "\u{1F6E1}"],
+  [/blue team|defen/i,                   "from-blue-500 to-indigo-600",   "\u{1F6E1}"],
+  [/critic|oppos|review/i,               "from-orange-500 to-red-500",    "\u{1F50D}"],
+  [/synth|mediat|integrat/i,             "from-emerald-500 to-teal-500",  "\u{1F517}"],
+  [/valid|test|qa/i,                     "from-pink-500 to-rose-500",     "✅"],
+  [/research|analy/i,                    "from-amber-500 to-orange-500",  "\u{1F4CA}"],
+  [/question|socrat/i,                   "from-yellow-500 to-amber-500",  "❓"],
+  [/answer|author|writ/i,                "from-teal-500 to-emerald-500",  "✍"],
+  [/engineer|infra|cloud|storage|data/i, "from-violet-500 to-purple-500", "⚙"],
+  [/propos|advocate|negoti/i,            "from-fuchsia-500 to-pink-500",  "\u{1F4AC}"],
+  [/execut|worker|async/i,               "from-lime-500 to-green-500",    "⚡"],
+]
+
+const FALLBACK_COLORS = [
+  "from-zinc-500 to-zinc-600",
+  "from-cyan-600 to-blue-600",
+  "from-purple-600 to-indigo-600",
+  "from-green-600 to-emerald-600",
+]
+
+function roleHash(role: string): number {
+  let h = 0
+  for (let i = 0; i < role.length; i++) h = (h * 31 + role.charCodeAt(i)) >>> 0
+  return h
+}
+
 function agentRoleColor(role: string): string {
-  const map: Record<string, string> = {
-    Planner: "from-indigo-500 to-blue-500",
-    Executor: "from-violet-500 to-purple-500",
-    Critic: "from-orange-500 to-red-500",
-    Synthesizer: "from-emerald-500 to-teal-500",
-    Validator: "from-pink-500 to-rose-500",
-  }
-  return map[role] ?? "from-zinc-500 to-zinc-600"
+  for (const [re, color] of ROLE_KEYWORDS) if (re.test(role)) return color
+  return FALLBACK_COLORS[roleHash(role) % FALLBACK_COLORS.length]
 }
 
 function agentRoleIcon(role: string): string {
-  const map: Record<string, string> = {
-    Planner: "🧠", Executor: "⚡", Critic: "🔍",
-    Synthesizer: "🔗", Validator: "✅",
+  for (const [re, , icon] of ROLE_KEYWORDS) if (re.test(role)) return icon
+  return "\u{1F916}"
+}
+
+const KIND_STYLE: Record<AgentEvent["kind"], { icon: string; color: string; label: string }> = {
+  decompose:  { icon: "\u{1F9E9}", color: "border-cyan-500/40 bg-cyan-500/5",       label: "Decomposition" },
+  agent_step: { icon: "\u{1F916}", color: "border-emerald-500/40 bg-emerald-500/5", label: "Agent step" },
+  synthesis:  { icon: "\u{1F517}", color: "border-violet-500/40 bg-violet-500/5",   label: "Synthesis" },
+  score:      { icon: "\u{1F4CA}", color: "border-amber-500/40 bg-amber-500/5",     label: "Score" },
+  phase:      { icon: "\u{1F3AF}", color: "border-indigo-500/40 bg-indigo-500/5",   label: "Phase" },
+}
+
+const ORIGIN_LABEL: Record<string, string> = {
+  dynamic: "minted for this task",
+  pool: "from shared pool",
+  inline: "mode role",
+}
+
+function formatDuration(ms: number): string {
+  if (!ms) return ""
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+/** Group consecutive events that share a dependency batch.
+ *  Events with no batch (decomposition, synthesis, scoring) become their own
+ *  group, so rendered order always matches execution order. */
+function groupByBatch(events: AgentEvent[]): { batch: number | null; events: AgentEvent[] }[] {
+  const groups: { batch: number | null; events: AgentEvent[] }[] = []
+  for (const event of events) {
+    const last = groups[groups.length - 1]
+    if (last && last.batch === event.batch && event.batch !== null) {
+      last.events.push(event)
+    } else {
+      groups.push({ batch: event.batch, events: [event] })
+    }
   }
-  return map[role] ?? "🤖"
+  return groups
 }
 
 function shortTime(iso: string): string {
@@ -81,10 +139,23 @@ export function TaskDetail({ taskId }: TaskDetailProps) {
   const [task, setTask] = useState<TaskResponse | null>(null)
   const [logs, setLogs] = useState<LogEvent[]>([])
   const [agents, setAgents] = useState<AgentCard[]>([])
+  const [events, setEvents] = useState<AgentEvent[]>([])
   const [loading, setLoading] = useState(true)
   // Which timeline events are expanded to show the full agent message.
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const timelineRef = useRef<HTMLDivElement>(null)
+
+  // Separate expansion state for structured agent events (keyed by seq, which
+  // is stable across polls) vs. raw log lines (keyed by array index).
+  const [expandedEvents, setExpandedEvents] = useState<Set<number>>(new Set())
+
+  const toggleAgentEvent = (seq: number) =>
+    setExpandedEvents((prev) => {
+      const next = new Set(prev)
+      if (next.has(seq)) next.delete(seq)
+      else next.add(seq)
+      return next
+    })
 
   const toggleEvent = (i: number) =>
     setExpanded((prev) => {
@@ -100,6 +171,7 @@ export function TaskDetail({ taskId }: TaskDetailProps) {
       const data: TaskLogs = await apiClient.getTaskLogs(taskId)
       setLogs(data.logs)
       if (data.agents?.length) setAgents(data.agents)
+      if (data.events?.length) setEvents(data.events)
     } catch (e) {
       // Suppress 404s — task may not have any logs yet
       if (!(e instanceof ApiError && e.status === 404)) {
@@ -324,14 +396,191 @@ export function TaskDetail({ taskId }: TaskDetailProps) {
                     <div className="min-w-0">
                       <p className="text-sm font-bold truncate">{agent.name}</p>
                       <p className="text-xs text-zinc-500 dark:text-zinc-400">{agent.role}</p>
-                      <Badge variant="outline" className="mt-1.5 text-xs px-1.5 py-0">
-                        {agent.mode}
-                      </Badge>
+                      <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                        <Badge variant="outline" className="text-xs px-1.5 py-0">
+                          {agent.mode}
+                        </Badge>
+                        {agent.origin && (
+                          <Badge variant="outline" className="text-[10px] px-1 py-0">
+                            {ORIGIN_LABEL[agent.origin] ?? agent.origin}
+                          </Badge>
+                        )}
+                        {typeof agent.batch === "number" && (
+                          <Badge variant="outline" className="text-[10px] px-1 py-0">
+                            batch {agent.batch}
+                          </Badge>
+                        )}
+                        {typeof agent.steps === "number" && agent.steps > 0 && (
+                          <span className="text-[10px] text-zinc-400">
+                            {agent.steps} step{agent.steps !== 1 ? "s" : ""}
+                          </span>
+                        )}
+                      </div>
+                      {agent.subtasks && agent.subtasks.length > 0 && (
+                        <p className="text-[10px] text-zinc-400 mt-1 truncate">
+                          {agent.subtasks.join(", ")}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>
               ))}
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Agent Activity (structured) ── */}
+      {events.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-base">🧠 Agent Activity</CardTitle>
+                <CardDescription>
+                  {events.filter((e) => e.kind === "agent_step").length} agent step
+                  {events.filter((e) => e.kind === "agent_step").length !== 1 ? "s" : ""} across{" "}
+                  {events.length} event{events.length !== 1 ? "s" : ""}
+                </CardDescription>
+              </div>
+              {isRunning && (
+                <div className="flex items-center gap-1.5 text-xs text-indigo-500">
+                  <span className="inline-block w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+                  Live
+                </div>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {groupByBatch(events).map((group, gi) => (
+              <div key={gi} className={group.batch !== null ? "rounded-xl border border-emerald-500/30 bg-emerald-500/[0.03] p-3" : ""}>
+                {group.batch !== null && (
+                  <div className="flex items-center gap-2 mb-2">
+                    <Badge variant="outline" className="text-xs">Batch {group.batch}</Badge>
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                      {group.events.filter((e) => e.kind === "agent_step").length > 1
+                        ? `${group.events.filter((e) => e.kind === "agent_step").length} agents in parallel`
+                        : "sequential step"}
+                    </span>
+                  </div>
+                )}
+
+                <div className="space-y-1.5">
+                  {group.events.map((event) => {
+                    const style = KIND_STYLE[event.kind] ?? KIND_STYLE.phase
+                    const key = `ev-${event.seq}`
+                    const isOpen = expandedEvents.has(event.seq)
+                    const hasDetail = Boolean(event.prompt || event.response)
+                    return (
+                      <div
+                        key={key}
+                        className={`rounded-lg border px-3 py-2 text-xs transition-all animate-in fade-in duration-300 ${style.color}`}
+                      >
+                        <div
+                          onClick={hasDetail ? () => toggleAgentEvent(event.seq) : undefined}
+                          role={hasDetail ? "button" : undefined}
+                          tabIndex={hasDetail ? 0 : undefined}
+                          onKeyDown={
+                            hasDetail
+                              ? (e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault()
+                                    toggleAgentEvent(event.seq)
+                                  }
+                                }
+                              : undefined
+                          }
+                          className={`flex items-start gap-2 ${
+                            hasDetail ? "cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500/50 rounded" : ""
+                          }`}
+                        >
+                          {hasDetail ? (
+                            <ChevronRight
+                              className={`h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-zinc-400 transition-transform ${
+                                isOpen ? "rotate-90" : ""
+                              }`}
+                            />
+                          ) : (
+                            <span className="text-sm leading-none mt-0.5 flex-shrink-0">{style.icon}</span>
+                          )}
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                              <span className="font-semibold text-zinc-800 dark:text-zinc-100">
+                                {event.agent_name ?? event.phase}
+                              </span>
+                              {event.agent_role && event.agent_name && (
+                                <span className="text-zinc-500 dark:text-zinc-400">{event.agent_role}</span>
+                              )}
+                              {event.agent_origin && (
+                                <Badge variant="outline" className="text-[10px] px-1 py-0">
+                                  {ORIGIN_LABEL[event.agent_origin] ?? event.agent_origin}
+                                </Badge>
+                              )}
+                              {event.score !== null && (
+                                <Badge variant="outline" className="text-[10px] px-1 py-0">
+                                  {event.score.toFixed(1)}/10
+                                </Badge>
+                              )}
+                            </div>
+
+                            <p className="text-zinc-500 dark:text-zinc-400 mt-0.5 font-mono text-[11px]">
+                              {event.agent_name ? event.phase : style.label}
+                              {event.subtask_id && ` · ${event.subtask_id}`}
+                              {event.duration_ms > 0 && ` · ${formatDuration(event.duration_ms)}`}
+                              {` · ${shortTime(event.timestamp)}`}
+                            </p>
+
+                            {event.depends_on.length > 0 && (
+                              <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5">
+                                depends on: {event.depends_on.join(", ")}
+                              </p>
+                            )}
+
+                            {!isOpen && event.response && (
+                              <p className="text-zinc-700 dark:text-zinc-300 mt-1 line-clamp-2 leading-snug break-words">
+                                {event.response}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {isOpen && (
+                          <div className="mt-2 space-y-2 pl-5">
+                            {event.prompt && (
+                              <div>
+                                <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-1">
+                                  Prompt
+                                </p>
+                                <pre className="whitespace-pre-wrap break-words rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-[11px] leading-snug max-h-48 overflow-y-auto">
+                                  {event.prompt}
+                                </pre>
+                              </div>
+                            )}
+                            {event.response && (
+                              <div>
+                                <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-1">
+                                  Response
+                                </p>
+                                <pre className="whitespace-pre-wrap break-words rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-[11px] leading-snug max-h-96 overflow-y-auto">
+                                  {event.response}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            ))}
+            {isRunning && (
+              <div className="flex items-center gap-2 text-xs text-zinc-400 px-1 py-1">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Waiting for next agent step…
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -342,8 +591,8 @@ export function TaskDetail({ taskId }: TaskDetailProps) {
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <div>
-                <CardTitle className="text-base">⚡ Execution Timeline</CardTitle>
-                <CardDescription>{logs.length} events captured</CardDescription>
+                <CardTitle className="text-base">⚡ Raw Log Stream</CardTitle>
+                <CardDescription>{logs.length} log lines captured</CardDescription>
               </div>
               {isRunning && (
                 <div className="flex items-center gap-1.5 text-xs text-indigo-500">
