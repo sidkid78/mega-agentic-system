@@ -131,7 +131,10 @@ from document_generation import (
     expand_document,
     translate_document,
     improve_document,
-    generate_with_research
+    generate_with_research,
+    transcribe_audio,
+    transcript_to_markdown,
+    TRANSCRIBE_MODEL
 )
 from code_generation import (
     generate_code,
@@ -1263,6 +1266,75 @@ async def research_document_endpoint(request: DocumentResearchRequest, ai_client
         )
         return {"success": True, "content": content, "topic": request.topic}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/documents/transcribe")
+async def transcribe_audio_endpoint(
+    file: UploadFile = File(...),
+    mode: str = Form(default="smart"),
+    language_codes: str = Form(default=""),
+    custom_vocabulary: str = Form(default=""),
+    diarize: bool = Form(default=False),
+    word_timestamps: bool = Form(default=False),
+    title: str = Form(default=""),
+    ai_client: genai.Client = Depends(get_gemini_client),
+):
+    """Transcribe an uploaded audio file with Gemini 3.5 Transcribe."""
+    if not ai_client:
+        raise HTTPException(status_code=503, detail="AI client not initialized")
+
+    if mode not in ("smart", "verbatim"):
+        raise HTTPException(status_code=400, detail="mode must be 'smart' or 'verbatim'")
+
+    languages = [c.strip() for c in language_codes.split(",") if c.strip()]
+    vocabulary = [v.strip() for v in custom_vocabulary.split(",") if v.strip()]
+
+    suffix = _os.path.splitext(file.filename or "")[1] or ".mp3"
+    contents = await file.read()
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=suffix, delete=False) as tmp:
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    try:
+        result = transcribe_audio(
+            client=ai_client,
+            audio_path=tmp_path,
+            mime_type=file.content_type,
+            mode=mode,
+            language_codes=languages or None,
+            custom_vocabulary=vocabulary or None,
+            diarize=diarize,
+            word_timestamps=word_timestamps,
+        )
+        markdown_doc = transcript_to_markdown(
+            result,
+            title=title or _os.path.splitext(file.filename or "Transcript")[0] or "Transcript",
+        )
+        return {
+            "success": True,
+            "text": result["text"],
+            "markdown": markdown_doc,
+            "words": result["words"],
+            "speakers": result["speakers"],
+            "mode": result["mode"],
+            "model": result["model"],
+            "filename": file.filename,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ServerError as e:
+        print(f"❌ Transcription server error: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Transcription service temporarily unavailable. Please try again in a moment."
+        )
+    except ClientError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid transcription request: {e}")
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"API error: {e}")
+    except Exception as e:
+        print(f"❌ Transcription error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

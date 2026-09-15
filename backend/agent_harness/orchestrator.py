@@ -34,8 +34,8 @@ client = genai.Client()
 
 # ─── Models ──────────────────────────────────────────────────────────────────
 ORCHESTRATOR_MODEL = "gemini-3.1-pro-preview"  # Deep thinker / planner
-LEAD_MODEL         = "gemini-3.5-flash"         # Fast planner / delegator
-WORKER_MODEL       = "gemini-3.5-flash"         # Fast executor
+LEAD_MODEL         = "gemini-3.7-flash"         # Fast planner / delegator
+WORKER_MODEL       = "gemini-3.7-flash"         # Fast executor
 
 
 # ═════════════════════════════════════════════════════════════════════════════
