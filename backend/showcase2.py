@@ -865,42 +865,27 @@ def _make_verbose_call_model(original_call_model, tag_prefix: str = ""):
     return verbose_call_model
 
 
-def _explain_agent_assignment(agents, mode_name: str, complexity_name: str) -> None:
-    """Explain why these specific agents were picked and which ones actually do work."""
-    t = Table(title=f"Agents Assigned — {mode_name} mode (complexity={complexity_name})",
+def _explain_agent_assignment(preview, mode_name: str, complexity_name: str) -> None:
+    """Show the agents a mode will use and where they come from.
+
+    `preview` is the (agents, note) tuple from MegaAgenticSystem.preview_agents.
+    Every agent listed is one the mode actually calls: modes own their agents
+    now, so there is no longer a slice of the shared pool sitting on standby.
+    """
+    agents, note = preview
+    t = Table(title=f"Agents — {mode_name} mode (complexity={complexity_name})",
               box=box.ROUNDED)
     t.add_column("#", style="bold dim", justify="right")
     t.add_column("Agent", style="bold")
     t.add_column("Role")
     t.add_column("Specialization")
-    t.add_column("Used by this mode?")
-
-    mode_usage = {
-        "HIERARCHICAL": {0: "Planner (Phase 1)", 1: "Executor (Phase 2)"},
-        "DEBATE":       {0: "Proposer (Phase 1)", 1: "Opposer (Phase 2)"},
-        "SWARM":        "all",
-        "REFLECTIVE":   {0: "Primary agent (all iterations)"},
-        "SOCRATIC":     {0: "Questioner", 1: "Answerer"},
-        "RED_BLUE":     {0: "Blue (initial)", 1: "Red (attack)", 2: "Blue (harden)"},
-        "NEGOTIATE":    "all (each gets a priority)",
-    }
-    usage = mode_usage.get(mode_name, "?")
 
     for i, a in enumerate(agents):
-        if usage == "all" or (isinstance(usage, str) and usage.startswith("all")):
-            used = f"✅  {usage}"
-        elif isinstance(usage, dict):
-            used = f"✅  {usage[i]}" if i in usage else "⬜  assigned but not called"
-        else:
-            used = "?"
-        t.add_row(str(i), a.name, a.role, a.specialization, used)
+        t.add_row(str(i), a.name, a.role, a.specialization)
 
-    console.print(t)
-    console.print(
-        f"\n  [dim]Note: The system always selects agents[0..n] from a fixed pool of 10. "
-        f"For COMPLEX tasks n=5, MODERATE n=3, SIMPLE n=2. "
-        f"Each mode only calls the agents it needs internally — the rest are 'on standby'.[/dim]\n"
-    )
+    if agents:
+        console.print(t)
+    console.print(f"\n  [dim]{note}[/dim]\n")
 
 
 def phase_14_mega_system(client: genai.Client) -> None:
@@ -946,8 +931,8 @@ def phase_14_mega_system(client: genai.Client) -> None:
         complexity=TaskComplexity.COMPLEX,
         preferred_mode=AgentMode.HIERARCHICAL,
     )
-    agents1 = mega._select_agents(AgentMode.HIERARCHICAL, task1.complexity)
-    _explain_agent_assignment(agents1, "HIERARCHICAL", task1.complexity.value)
+    preview1 = mega.preview_agents(AgentMode.HIERARCHICAL, task1.complexity)
+    _explain_agent_assignment(preview1, "HIERARCHICAL", task1.complexity.value)
     _step_counter[0] = 0
     result1 = mega.execute(task1)
     console.print()
@@ -979,8 +964,8 @@ def phase_14_mega_system(client: genai.Client) -> None:
         complexity=TaskComplexity.MODERATE,
         preferred_mode=AgentMode.DEBATE,
     )
-    agents2 = mega._select_agents(AgentMode.DEBATE, task2.complexity)
-    _explain_agent_assignment(agents2, "DEBATE", task2.complexity.value)
+    preview2 = mega.preview_agents(AgentMode.DEBATE, task2.complexity)
+    _explain_agent_assignment(preview2, "DEBATE", task2.complexity.value)
     _step_counter[0] = 0
     result2 = mega.execute(task2)
     console.print()
@@ -1014,8 +999,8 @@ def phase_14_mega_system(client: genai.Client) -> None:
         quality_threshold=8.5,
         max_iterations=2,
     )
-    agents3 = mega._select_agents(AgentMode.REFLECTIVE, task3.complexity)
-    _explain_agent_assignment(agents3, "REFLECTIVE", task3.complexity.value)
+    preview3 = mega.preview_agents(AgentMode.REFLECTIVE, task3.complexity)
+    _explain_agent_assignment(preview3, "REFLECTIVE", task3.complexity.value)
     _step_counter[0] = 0
     result3 = mega.execute(task3)
     console.print()

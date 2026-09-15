@@ -8,6 +8,11 @@ const nextConfig: NextConfig = {
   // LAN load /_next/* dev resources so the page hydrates and is clickable.
   // Friends connect to this PC's IP, so that IP is the origin to allow.
   allowedDevOrigins: ["192.168.18.3", "192.168.18.*", "192.168.1.*"],
+  experimental: {
+    serverActions: {
+      bodySizeLimit: "50mb",
+    },
+  },
 };
 
 export default nextConfig;

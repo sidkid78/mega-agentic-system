@@ -13,8 +13,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { apiClient } from "@/lib/api"
-import { Loader2, FileText, Sparkles, CheckCircle2, Globe, ArrowUpRight, Wand2, Languages, Search } from "lucide-react"
+import { apiClient, type TranscriptionResponse } from "@/lib/api"
+import { Loader2, FileText, Sparkles, CheckCircle2, Globe, ArrowUpRight, Wand2, Languages, Search, Mic } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { MarkdownRenderer } from "@/components/markdown-renderer"
 
@@ -67,7 +67,23 @@ export default function DocumentsPage() {
   const [researching, setResearching] = useState(false)
   const [researchContent, setResearchContent] = useState<string | null>(null)
 
+  // Transcribe tab state
+  const [audioFile, setAudioFile] = useState<File | null>(null)
+  const [transcriptionMode, setTranscriptionMode] = useState<"smart" | "verbatim">("smart")
+  const [languageCodes, setLanguageCodes] = useState("")
+  const [customVocabulary, setCustomVocabulary] = useState("")
+  const [diarize, setDiarize] = useState(false)
+  const [wordTimestamps, setWordTimestamps] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
+  const [transcription, setTranscription] = useState<TranscriptionResponse | null>(null)
+
+  const [activeTab, setActiveTab] = useState("generate")
   const [error, setError] = useState<string | null>(null)
+
+  // Verbatim-only features; the API rejects them alongside smart mode or custom vocabulary.
+  const isSmartMode = transcriptionMode === "smart"
+  const hasCustomVocabulary = customVocabulary.trim().length > 0
+  const canUseWordFeatures = !isSmartMode && !hasCustomVocabulary
 
   const handleGenerate = async () => {
     if (!topic.trim()) return
@@ -183,6 +199,35 @@ export default function DocumentsPage() {
     }
   }
 
+  const handleTranscribe = async () => {
+    if (!audioFile) return
+    setTranscribing(true)
+    setError(null)
+    setTranscription(null)
+
+    try {
+      const result = await apiClient.transcribeAudio(audioFile, {
+        mode: transcriptionMode,
+        language_codes: languageCodes,
+        custom_vocabulary: customVocabulary,
+        diarize: canUseWordFeatures && diarize,
+        word_timestamps: canUseWordFeatures && wordTimestamps,
+      })
+      setTranscription(result)
+    } catch (err: unknown) {
+      setError((err as Error).message || "Failed to transcribe audio")
+    } finally {
+      setTranscribing(false)
+    }
+  }
+
+  const handleSendTranscriptTo = (tab: "summarize" | "improve") => {
+    if (!transcription) return
+    if (tab === "summarize") setSummarizeContent(transcription.markdown)
+    else setImproveContent(transcription.markdown)
+    setActiveTab(tab)
+  }
+
   const DocumentPreview = ({ content, title }: { content: string; title?: string }) => (
     <div className="space-y-2">
       {title && <div className="text-sm font-medium text-zinc-400">{title}</div>}
@@ -209,7 +254,7 @@ export default function DocumentsPage() {
           <ThemeToggle />
         </div>
 
-        <Tabs defaultValue="generate" className="space-y-6">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
           <TabsList className="glass-card p-1.5 gap-1 flex-wrap">
             <TabsTrigger value="generate">
               <FileText className="h-4 w-4 mr-2" />
@@ -234,6 +279,10 @@ export default function DocumentsPage() {
             <TabsTrigger value="research">
               <Search className="h-4 w-4 mr-2" />
               Research
+            </TabsTrigger>
+            <TabsTrigger value="transcribe">
+              <Mic className="h-4 w-4 mr-2" />
+              Transcribe
             </TabsTrigger>
           </TabsList>
 
@@ -509,6 +558,91 @@ export default function DocumentsPage() {
                 </CardHeader>
                 <CardContent>
                   {researchContent ? <DocumentPreview content={researchContent} /> : <div className="py-12 text-center"><Globe className="h-12 w-12 mx-auto text-zinc-600 mb-4" /><p className="text-zinc-400">Enter a topic to research and generate!</p></div>}
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+
+          {/* Transcribe Tab */}
+          <TabsContent value="transcribe">
+            <div className="grid gap-6 md:grid-cols-3">
+              <Card className="md:col-span-1">
+                <CardHeader>
+                  <CardTitle>Audio</CardTitle>
+                  <CardDescription>Speech to text with Gemini 3.5 Transcribe</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Audio file * (up to 1 hour)</label>
+                    <Input type="file" accept="audio/*" onChange={(e) => setAudioFile(e.target.files?.[0] ?? null)} />
+                    {audioFile && <p className="text-xs text-zinc-400">{audioFile.name}</p>}
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Mode</label>
+                    <Select value={transcriptionMode} onValueChange={(value) => setTranscriptionMode(value as "smart" | "verbatim")}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="smart">Smart (cleaned up &amp; formatted)</SelectItem>
+                        <SelectItem value="verbatim">Verbatim (word-for-word)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Language hints</label>
+                    <Input placeholder="Auto-detect — or e.g. en-US, es-ES" value={languageCodes} onChange={(e) => setLanguageCodes(e.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Custom vocabulary</label>
+                    <Textarea placeholder="Comma-separated terms, e.g. Kubernetes, BigQuery" value={customVocabulary} onChange={(e) => setCustomVocabulary(e.target.value)} rows={2} className="resize-none" />
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input type="checkbox" id="diarize" checked={diarize && canUseWordFeatures} disabled={!canUseWordFeatures} onChange={(e) => setDiarize(e.target.checked)} className="rounded" />
+                    <label htmlFor="diarize" className="text-sm font-medium">Label speakers</label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input type="checkbox" id="timestamps" checked={wordTimestamps && canUseWordFeatures} disabled={!canUseWordFeatures} onChange={(e) => setWordTimestamps(e.target.checked)} className="rounded" />
+                    <label htmlFor="timestamps" className="text-sm font-medium">Word timestamps</label>
+                  </div>
+                  {!canUseWordFeatures && (
+                    <p className="text-xs text-zinc-400">
+                      {isSmartMode
+                        ? "Speaker labels and timestamps need verbatim mode."
+                        : "Custom vocabulary can't be combined with speaker labels or timestamps."}
+                    </p>
+                  )}
+                  <Button onClick={handleTranscribe} disabled={transcribing || !audioFile} className="w-full pulse-glow">
+                    {transcribing ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Transcribing...</> : <><Mic className="mr-2 h-4 w-4" />Transcribe</>}
+                  </Button>
+                </CardContent>
+              </Card>
+              <Card className="md:col-span-2">
+                <CardHeader>
+                  <CardTitle>Transcript</CardTitle>
+                  <CardDescription>
+                    {transcription
+                      ? `${transcription.model} · ${transcription.mode}${transcription.speakers.length > 0 ? ` · ${transcription.speakers.length} speakers` : ""}`
+                      : "Upload an audio file to get a markdown transcript"}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {transcription ? (
+                    <>
+                      <div className="flex flex-wrap gap-2">
+                        <Button variant="outline" size="sm" onClick={() => handleSendTranscriptTo("summarize")}>
+                          <ArrowUpRight className="mr-2 h-4 w-4" />Summarize this
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => handleSendTranscriptTo("improve")}>
+                          <Wand2 className="mr-2 h-4 w-4" />Improve this
+                        </Button>
+                      </div>
+                      <DocumentPreview content={transcription.markdown} />
+                    </>
+                  ) : (
+                    <div className="py-12 text-center">
+                      <Mic className="h-12 w-12 mx-auto text-zinc-600 mb-4" />
+                      <p className="text-zinc-400">Pick an audio file to transcribe it into a document!</p>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </div>

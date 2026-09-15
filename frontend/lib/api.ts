@@ -91,6 +91,37 @@ export interface AgentCard {
   name: string;
   role: string;
   mode: string;
+  /** Where this agent came from: minted per sub-task, drawn from the shared
+   *  pool, or declared inline by the mode. */
+  origin?: "dynamic" | "pool" | "inline";
+  /** How many steps this agent actually executed. */
+  steps?: number;
+  /** Sub-task ids this agent owned (hierarchical mode). */
+  subtasks?: string[];
+  /** Dependency batch this agent ran in (hierarchical mode). */
+  batch?: number | null;
+}
+
+/** One structured step taken by one agent.
+ *
+ *  Emitted directly by the orchestrator rather than inferred from log text,
+ *  so phase, agent identity and batch are authoritative instead of guessed. */
+export interface AgentEvent {
+  seq: number;
+  timestamp: string;
+  kind: "decompose" | "agent_step" | "synthesis" | "score" | "phase";
+  mode: string;
+  phase: string;
+  agent_name: string | null;
+  agent_role: string | null;
+  agent_origin: "dynamic" | "pool" | "inline" | null;
+  subtask_id: string | null;
+  batch: number | null;
+  depends_on: string[];
+  prompt: string;
+  response: string;
+  score: number | null;
+  duration_ms: number;
 }
 
 export interface TaskLogs {
@@ -98,6 +129,7 @@ export interface TaskLogs {
   status: string;
   logs: LogEvent[];
   agents: AgentCard[];
+  events: AgentEvent[];
 }
 
 export class ApiError extends Error {
@@ -155,6 +187,24 @@ export interface LiveMusicConfig {
   mute_drums?: boolean;
   only_bass_and_drums?: boolean;
   music_generation_mode?: string;
+}
+
+export interface TranscriptWord {
+  text: string;
+  speaker?: string | null;
+  start_offset?: string | null;
+  end_offset?: string | null;
+}
+
+export interface TranscriptionResponse {
+  success: boolean;
+  text: string;
+  markdown: string;
+  words: TranscriptWord[];
+  speakers: string[];
+  mode: string;
+  model: string;
+  filename: string;
 }
 
 class ApiClient {
@@ -369,6 +419,39 @@ class ApiClient {
       method: "POST",
       body: JSON.stringify({ topic, use_grounding }),
     });
+  }
+
+  async transcribeAudio(
+    file: File,
+    options: {
+      mode?: "smart" | "verbatim";
+      language_codes?: string;
+      custom_vocabulary?: string;
+      diarize?: boolean;
+      word_timestamps?: boolean;
+      title?: string;
+    } = {},
+  ): Promise<TranscriptionResponse> {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("mode", options.mode ?? "smart");
+    if (options.language_codes) form.append("language_codes", options.language_codes);
+    if (options.custom_vocabulary) form.append("custom_vocabulary", options.custom_vocabulary);
+    form.append("diarize", String(options.diarize ?? false));
+    form.append("word_timestamps", String(options.word_timestamps ?? false));
+    if (options.title) form.append("title", options.title);
+
+    // Sent as multipart, so don't go through request() — it forces a JSON content type.
+    const response = await fetch(`${this.baseUrl}/documents/transcribe`, {
+      method: "POST",
+      headers: { ...apiKeyHeader() },
+      body: form,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new ApiError(error.detail || `HTTP ${response.status}`, response.status);
+    }
+    return response.json();
   }
 
   // Code Generation

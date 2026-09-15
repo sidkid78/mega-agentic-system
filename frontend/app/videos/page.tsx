@@ -31,16 +31,76 @@ interface ReferenceImageSlot {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function fileToBase64(file: File): Promise<{ base64: string; mimeType: string; preview: string }> {
+function fileToBase64(
+    file: File,
+    maxDimension = 1920,
+    quality = 0.88
+): Promise<{ base64: string; mimeType: string; preview: string }> {
     return new Promise((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => {
-            const dataUrl = reader.result as string
-            const base64 = dataUrl.split(",")[1]
-            resolve({ base64, mimeType: file.type, preview: dataUrl })
+        // If not an image (e.g. video), read directly
+        if (!file.type.startsWith("image/")) {
+            const reader = new FileReader()
+            reader.onload = () => {
+                const dataUrl = reader.result as string
+                const base64 = dataUrl.split(",")[1]
+                resolve({ base64, mimeType: file.type, preview: dataUrl })
+            }
+            reader.onerror = reject
+            reader.readAsDataURL(file)
+            return
         }
-        reader.onerror = reject
-        reader.readAsDataURL(file)
+
+        const img = new Image()
+        const objectUrl = URL.createObjectURL(file)
+        img.onload = () => {
+            URL.revokeObjectURL(objectUrl)
+            let width = img.width
+            let height = img.height
+
+            // Scale down smoothly if exceeding max dimension
+            if (width > maxDimension || height > maxDimension) {
+                if (width > height) {
+                    height = Math.round((height * maxDimension) / width)
+                    width = maxDimension
+                } else {
+                    width = Math.round((width * maxDimension) / height)
+                    height = maxDimension
+                }
+            }
+
+            const canvas = document.createElement("canvas")
+            canvas.width = width
+            canvas.height = height
+            const ctx = canvas.getContext("2d")
+            if (!ctx) {
+                const reader = new FileReader()
+                reader.onload = () => {
+                    const dataUrl = reader.result as string
+                    resolve({ base64: dataUrl.split(",")[1], mimeType: file.type, preview: dataUrl })
+                }
+                reader.onerror = reject
+                reader.readAsDataURL(file)
+                return
+            }
+
+            ctx.drawImage(img, 0, 0, width, height)
+            const targetMime = file.type === "image/png" ? "image/png" : "image/jpeg"
+            const dataUrl = canvas.toDataURL(targetMime, quality)
+            const base64 = dataUrl.split(",")[1]
+            resolve({ base64, mimeType: targetMime, preview: dataUrl })
+        }
+        img.onerror = () => {
+            URL.revokeObjectURL(objectUrl)
+            // Fallback to simple reader
+            const reader = new FileReader()
+            reader.onload = () => {
+                const dataUrl = reader.result as string
+                resolve({ base64: dataUrl.split(",")[1], mimeType: file.type, preview: dataUrl })
+            }
+            reader.onerror = reject
+            reader.readAsDataURL(file)
+        }
+        img.src = objectUrl
     })
 }
 
@@ -50,8 +110,21 @@ async function startGeneration(payload: Record<string, unknown>): Promise<string
         headers: { "Content-Type": "application/json", ...apiKeyHeader() },
         body: JSON.stringify(payload),
     })
+    if (!res.ok) {
+        let errorMsg = `Generation failed (HTTP ${res.status})`
+        if (res.status === 413) {
+            errorMsg = "Payload too large (413). The uploaded image or video exceeds the size limit. Please upload a smaller file."
+        } else {
+            try {
+                const data = await res.json()
+                if (data.error) errorMsg = data.error
+            } catch {
+                // Ignore json parse error for non-json responses
+            }
+        }
+        throw new Error(errorMsg)
+    }
     const data = await res.json()
-    if (!res.ok) throw new Error(data.error || "Failed to start generation")
     return data.operationName as string
 }
 
@@ -73,8 +146,21 @@ async function startOmni(payload: Record<string, unknown>): Promise<string> {
         headers: { "Content-Type": "application/json", ...apiKeyHeader() },
         body: JSON.stringify(payload),
     })
+    if (!res.ok) {
+        let errorMsg = `Omni generation failed (HTTP ${res.status})`
+        if (res.status === 413) {
+            errorMsg = "Payload too large (413). The uploaded image or video exceeds the size limit. Please upload a smaller file."
+        } else {
+            try {
+                const data = await res.json()
+                if (data.error) errorMsg = data.error
+            } catch {
+                // Ignore json parse error for non-json responses
+            }
+        }
+        throw new Error(errorMsg)
+    }
     const data = await res.json()
-    if (!res.ok) throw new Error(data.error || "Failed to start Omni generation")
     return data.interactionId as string
 }
 

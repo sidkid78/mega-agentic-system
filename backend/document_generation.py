@@ -1,5 +1,6 @@
 import markdown
 import json
+import time
 from typing import Optional, List, Dict, Any, Literal
 from pathlib import Path
 from datetime import datetime
@@ -701,6 +702,328 @@ def batch_generate_documents(
             results.append(None)
     
     return results
+
+
+# ============================================================================
+# AUDIO TRANSCRIPTION (Gemini 3.5 Transcribe, via the Interactions API)
+# ============================================================================
+
+TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
+
+# Mime types accepted by an Interactions audio content block.
+SUPPORTED_AUDIO_MIME_TYPES = {
+    "audio/wav",
+    "audio/mp3",
+    "audio/aiff",
+    "audio/aac",
+    "audio/ogg",
+    "audio/flac",
+    "audio/mpeg",
+    "audio/m4a",
+    "audio/l16",
+    "audio/opus",
+    "audio/alaw",
+    "audio/mulaw",
+}
+
+# Common browser/OS spellings mapped onto the accepted set above.
+_AUDIO_MIME_ALIASES = {
+    "audio/x-wav": "audio/wav",
+    "audio/wave": "audio/wav",
+    "audio/vnd.wave": "audio/wav",
+    "audio/x-m4a": "audio/m4a",
+    "audio/mp4": "audio/m4a",
+    "audio/x-aiff": "audio/aiff",
+    "audio/mpeg3": "audio/mpeg",
+    "audio/x-mpeg-3": "audio/mpeg",
+    "audio/x-flac": "audio/flac",
+    "audio/ogg; codecs=opus": "audio/ogg",
+}
+
+_AUDIO_EXTENSION_MIME_TYPES = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mp3",
+    ".aiff": "audio/aiff",
+    ".aif": "audio/aiff",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".flac": "audio/flac",
+    ".m4a": "audio/m4a",
+    ".mp4": "audio/m4a",
+    ".opus": "audio/opus",
+}
+
+
+class TranscriptWord(BaseModel):
+    """A single recognized word with optional speaker and timing metadata."""
+    text: str
+    speaker: Optional[str] = None
+    start_offset: Optional[str] = None
+    end_offset: Optional[str] = None
+
+
+def normalize_audio_mime_type(
+    mime_type: Optional[str] = None,
+    filename: Optional[str] = None
+) -> str:
+    """
+    Resolve a usable audio mime type from a declared type and/or a filename.
+
+    Args:
+        mime_type (str, optional): Mime type reported by the client/browser.
+        filename (str, optional): Source filename, used as a fallback.
+
+    Returns:
+        str: A mime type accepted by gemini-3.5-transcribe.
+
+    Raises:
+        ValueError: If neither input resolves to a supported audio type.
+    """
+    candidate = (mime_type or "").strip().lower()
+    candidate = _AUDIO_MIME_ALIASES.get(candidate, candidate)
+
+    if candidate not in SUPPORTED_AUDIO_MIME_TYPES and filename:
+        suffix = Path(filename).suffix.lower()
+        candidate = _AUDIO_EXTENSION_MIME_TYPES.get(suffix, candidate)
+
+    if candidate not in SUPPORTED_AUDIO_MIME_TYPES:
+        supported = ", ".join(sorted(SUPPORTED_AUDIO_MIME_TYPES))
+        raise ValueError(
+            f"Unsupported audio type '{mime_type or filename or 'unknown'}'. "
+            f"Supported types: {supported}"
+        )
+
+    return candidate
+
+
+def _build_transcription_config(
+    mode: Literal["smart", "verbatim"],
+    language_codes: Optional[List[str]],
+    custom_vocabulary: Optional[List[str]],
+    diarize: bool,
+    word_timestamps: bool
+) -> Dict[str, Any]:
+    """Build the transcription_config block, enforcing API feature exclusions."""
+    if custom_vocabulary and (diarize or word_timestamps):
+        raise ValueError(
+            "custom_vocabulary cannot be combined with speaker diarization "
+            "or word-level timestamps."
+        )
+    if mode == "smart" and (diarize or word_timestamps):
+        raise ValueError(
+            "Smart transcription cannot be combined with speaker diarization "
+            "or word-level timestamps. Use mode='verbatim' for those."
+        )
+
+    config: Dict[str, Any] = {}
+
+    if mode == "smart":
+        config["mode"] = "smart"
+    else:
+        verbatim: Dict[str, Any] = {"type": "verbatim"}
+        if diarize:
+            verbatim["diarization_mode"] = "speaker"
+        if word_timestamps:
+            verbatim["timestamp_granularities"] = ["word"]
+        config["mode"] = verbatim
+
+    if language_codes is not None:
+        # An empty list explicitly requests automatic language detection.
+        config["language_codes"] = language_codes
+    if custom_vocabulary:
+        # The API accepts up to 1,000 phrases.
+        config["custom_vocabulary"] = custom_vocabulary[:1000]
+
+    return config
+
+
+def _extract_word_annotations(interaction: Any) -> List[TranscriptWord]:
+    """Pull word_info annotations (speakers/timestamps) out of an interaction."""
+    words: List[TranscriptWord] = []
+    for step in getattr(interaction, "steps", None) or []:
+        for content in getattr(step, "content", None) or []:
+            for annotation in getattr(content, "annotations", None) or []:
+                if getattr(annotation, "type", None) != "word_info":
+                    continue
+                words.append(TranscriptWord(
+                    text=getattr(annotation, "text", "") or "",
+                    speaker=getattr(annotation, "speaker", None),
+                    start_offset=getattr(annotation, "start_offset", None),
+                    end_offset=getattr(annotation, "end_offset", None),
+                ))
+    return words
+
+
+def _wait_for_active_file(client: genai.Client, file: Any, timeout_s: float = 180.0) -> Any:
+    """Poll an uploaded file until the Files API finishes processing it."""
+    deadline = time.time() + timeout_s
+    current = file
+    while str(getattr(current, "state", "")).endswith("PROCESSING"):
+        if time.time() > deadline:
+            raise TimeoutError(
+                f"Timed out waiting for audio file '{getattr(file, 'name', '?')}' to become ACTIVE."
+            )
+        time.sleep(2)
+        current = client.files.get(name=current.name)
+
+    if str(getattr(current, "state", "")).endswith("FAILED"):
+        raise RuntimeError(f"Audio upload failed processing: {getattr(current, 'error', None)}")
+
+    return current
+
+
+def transcribe_audio(
+    client: genai.Client,
+    audio_path: str,
+    mime_type: Optional[str] = None,
+    mode: Literal["smart", "verbatim"] = "smart",
+    language_codes: Optional[List[str]] = None,
+    custom_vocabulary: Optional[List[str]] = None,
+    diarize: bool = False,
+    word_timestamps: bool = False,
+    model: str = TRANSCRIBE_MODEL
+) -> Dict[str, Any]:
+    """
+    Transcribe an audio file to text with Gemini 3.5 Transcribe.
+
+    Uses the Interactions API (client.interactions.create), which is where the
+    dedicated speech-to-text model lives — not models.generate_content.
+
+    Args:
+        client (genai.Client): An initialized Gemini API client
+        audio_path (str): Path to a local audio file (up to 1 hour of audio)
+        mime_type (str, optional): Audio mime type; inferred from the path if omitted
+        mode (str, optional): "smart" (disfluencies removed, formatted) or
+            "verbatim" (word-for-word). Defaults to "smart".
+        language_codes (List[str], optional): BCP-47 hints, e.g. ["es-ES"].
+            None or [] leaves language detection automatic.
+        custom_vocabulary (List[str], optional): Up to 1,000 domain terms to bias
+            recognition toward. Incompatible with diarize/word_timestamps.
+        diarize (bool, optional): Label speakers (spk_1, spk_2, ...). Verbatim only.
+        word_timestamps (bool, optional): Emit per-word offsets. Verbatim only.
+        model (str, optional): Model to use. Defaults to "gemini-3.5-transcribe".
+
+    Returns:
+        Dict[str, Any]: {"text", "words", "speakers", "mode", "model", "language_codes"}
+
+    Raises:
+        ValueError: On unsupported audio types or incompatible option combinations.
+
+    Example:
+        >>> result = transcribe_audio(client, "meeting.mp3", mode="verbatim", diarize=True)
+        >>> print(result["text"])
+    """
+    resolved_mime = normalize_audio_mime_type(mime_type, audio_path)
+    transcription_config = _build_transcription_config(
+        mode, language_codes, custom_vocabulary, diarize, word_timestamps
+    )
+
+    audio_file = client.files.upload(file=audio_path, config={"mime_type": resolved_mime})
+    try:
+        audio_file = _wait_for_active_file(client, audio_file)
+
+        interaction = client.interactions.create(
+            model=model,
+            input=[
+                {
+                    "type": "audio",
+                    "uri": audio_file.uri,
+                    "mime_type": resolved_mime,
+                }
+            ],
+            generation_config={"transcription_config": transcription_config},
+        )
+    finally:
+        # Uploaded files expire on their own, but don't leave them lying around.
+        try:
+            client.files.delete(name=audio_file.name)
+        except Exception:
+            pass
+
+    words = _extract_word_annotations(interaction)
+    speakers = sorted({w.speaker for w in words if w.speaker})
+
+    return {
+        "text": interaction.output_text or "",
+        "words": [w.model_dump() for w in words],
+        "speakers": speakers,
+        "mode": mode,
+        "model": model,
+        "language_codes": language_codes or [],
+    }
+
+
+def _format_offset(offset: Optional[str]) -> str:
+    """Render an API offset ("12.400s") as mm:ss; pass anything odd through."""
+    if not offset:
+        return ""
+    try:
+        total = float(str(offset).rstrip("s"))
+    except ValueError:
+        return str(offset)
+    minutes, seconds = divmod(int(total), 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def transcript_to_markdown(
+    result: Dict[str, Any],
+    title: str = "Transcript",
+    include_timestamps: bool = True
+) -> str:
+    """
+    Turn a transcribe_audio() result into a markdown document.
+
+    Speaker turns become labelled paragraphs so the transcript can be fed
+    straight into summarize_document(), improve_document(), generate_document(),
+    and the rest of the document pipeline.
+
+    Args:
+        result (Dict[str, Any]): The dict returned by transcribe_audio()
+        title (str, optional): Document heading. Defaults to "Transcript".
+        include_timestamps (bool, optional): Prefix speaker turns with a start
+            time when word timestamps are present. Defaults to True.
+
+    Returns:
+        str: Markdown-formatted transcript
+    """
+    lines = [f"# {title}", ""]
+
+    speakers = result.get("speakers") or []
+    meta = [f"**Model:** {result.get('model', TRANSCRIBE_MODEL)}", f"**Mode:** {result.get('mode', 'smart')}"]
+    if speakers:
+        meta.append(f"**Speakers:** {len(speakers)}")
+    lines.append(" · ".join(meta))
+    lines.append("")
+
+    words = result.get("words") or []
+    if not speakers or not words:
+        lines.append(result.get("text", "").strip())
+        return "\n".join(lines).strip()
+
+    # Group consecutive words into one paragraph per speaker turn.
+    current_speaker: Optional[str] = None
+    turn_words: List[str] = []
+    turn_start: Optional[str] = None
+
+    def flush() -> None:
+        if not turn_words:
+            return
+        stamp = f"`[{_format_offset(turn_start)}]` " if include_timestamps and turn_start else ""
+        lines.append(f"**{current_speaker or 'Speaker'}:** {stamp}{' '.join(turn_words)}")
+        lines.append("")
+
+    for word in words:
+        speaker = word.get("speaker")
+        if speaker != current_speaker:
+            flush()
+            current_speaker = speaker
+            turn_words = []
+            turn_start = word.get("start_offset")
+        turn_words.append(word.get("text", ""))
+    flush()
+
+    return "\n".join(lines).strip()
 
 
 # Usage Examples

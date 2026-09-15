@@ -131,7 +131,10 @@ from document_generation import (
     expand_document,
     translate_document,
     improve_document,
-    generate_with_research
+    generate_with_research,
+    transcribe_audio,
+    transcript_to_markdown,
+    TRANSCRIBE_MODEL
 )
 from code_generation import (
     generate_code,
@@ -630,6 +633,7 @@ async def create_task(task_data: TaskCreate, background_tasks: BackgroundTasks,
         "error": None,
         "logs": [],
         "agents": [],
+        "events": [],
     }
     
     # Execute in background (carries the caller's key — BYOK)
@@ -668,6 +672,16 @@ async def execute_task_background(task_id: str, task: Task, gemini_key: str):
 
         # Execute with a system built from the caller's own key.
         system = MegaAgenticSystem(name=f"task-{task_id}", api_key=gemini_key)
+
+        # Structured agent events stream straight into the store as they happen,
+        # so a polling client sees the timeline build mid-run rather than only
+        # at completion. This replaces inferring structure from log prose.
+        def _on_event(event):
+            entry = task_store.get(task_id)
+            if entry is not None:
+                entry["events"].append(event.to_dict())
+        system.event_sink = _on_event
+
         result: ExecutionResult = system.execute(task)
 
         # Fold this run's history into the shared singleton for /metrics.
@@ -677,19 +691,27 @@ async def execute_task_background(task_id: str, task: Task, gemini_key: str):
         except Exception:
             pass
 
-        # Always set agents from the actual result — never use log-based seeding
-        # (log parsing is too ambiguous and fires before the correct plan message)
-        if result.agents_involved:
-            role_names = ["Planner", "Executor", "Critic", "Synthesizer", "Validator"]
-            task_store[task_id]["agents"] = [
-                {
-                    "id": i + 1,
-                    "name": f"Agent {i + 1}",
-                    "role": role_names[i] if i < len(role_names) else f"Agent {i + 1}",
-                    "mode": result.mode_used.value,
-                }
-                for i in range(result.agents_involved)
-            ]
+        # Agent cards come from the agents that actually ran. This used to
+        # fabricate "Agent 1..N" with placeholder roles, which is why the UI
+        # never showed what the agents were really doing.
+        cards = {}
+        for event in system.events:
+            if not event.agent_name:
+                continue
+            card = cards.setdefault(event.agent_name, {
+                "id": len(cards) + 1,
+                "name": event.agent_name,
+                "role": event.agent_role or "Agent",
+                "origin": event.agent_origin or "inline",
+                "mode": event.mode,
+                "steps": 0,
+                "subtasks": [],
+                "batch": event.batch,
+            })
+            card["steps"] += 1
+            if event.subtask_id and event.subtask_id not in card["subtasks"]:
+                card["subtasks"].append(event.subtask_id)
+        task_store[task_id]["agents"] = list(cards.values())
 
         # Update store
         task_store[task_id].update({
@@ -746,6 +768,7 @@ async def get_task_logs(task_id: str):
         "task_id": task_id,
         "logs": task_store[task_id].get("logs", []),
         "agents": task_store[task_id].get("agents", []),
+        "events": task_store[task_id].get("events", []),
         "status": task_store[task_id]["status"],
     }
 
@@ -1263,6 +1286,75 @@ async def research_document_endpoint(request: DocumentResearchRequest, ai_client
         )
         return {"success": True, "content": content, "topic": request.topic}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/documents/transcribe")
+async def transcribe_audio_endpoint(
+    file: UploadFile = File(...),
+    mode: str = Form(default="smart"),
+    language_codes: str = Form(default=""),
+    custom_vocabulary: str = Form(default=""),
+    diarize: bool = Form(default=False),
+    word_timestamps: bool = Form(default=False),
+    title: str = Form(default=""),
+    ai_client: genai.Client = Depends(get_gemini_client),
+):
+    """Transcribe an uploaded audio file with Gemini 3.5 Transcribe."""
+    if not ai_client:
+        raise HTTPException(status_code=503, detail="AI client not initialized")
+
+    if mode not in ("smart", "verbatim"):
+        raise HTTPException(status_code=400, detail="mode must be 'smart' or 'verbatim'")
+
+    languages = [c.strip() for c in language_codes.split(",") if c.strip()]
+    vocabulary = [v.strip() for v in custom_vocabulary.split(",") if v.strip()]
+
+    suffix = _os.path.splitext(file.filename or "")[1] or ".mp3"
+    contents = await file.read()
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=suffix, delete=False) as tmp:
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    try:
+        result = transcribe_audio(
+            client=ai_client,
+            audio_path=tmp_path,
+            mime_type=file.content_type,
+            mode=mode,
+            language_codes=languages or None,
+            custom_vocabulary=vocabulary or None,
+            diarize=diarize,
+            word_timestamps=word_timestamps,
+        )
+        markdown_doc = transcript_to_markdown(
+            result,
+            title=title or _os.path.splitext(file.filename or "Transcript")[0] or "Transcript",
+        )
+        return {
+            "success": True,
+            "text": result["text"],
+            "markdown": markdown_doc,
+            "words": result["words"],
+            "speakers": result["speakers"],
+            "mode": result["mode"],
+            "model": result["model"],
+            "filename": file.filename,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ServerError as e:
+        print(f"❌ Transcription server error: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Transcription service temporarily unavailable. Please try again in a moment."
+        )
+    except ClientError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid transcription request: {e}")
+    except APIError as e:
+        raise HTTPException(status_code=502, detail=f"API error: {e}")
+    except Exception as e:
+        print(f"❌ Transcription error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
