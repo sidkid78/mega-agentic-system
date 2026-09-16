@@ -147,6 +147,7 @@ from code_generation import (
     validate_syntax
 )
 from ai_research_platform import AIResearchPlatform
+from agent_harness.service import run_multi_team
 from main import (
     search_arxiv,
     search_pubmed,
@@ -777,6 +778,7 @@ async def get_task_logs(task_id: str):
         "logs": task_store[task_id].get("logs", []),
         "agents": task_store[task_id].get("agents", []),
         "events": task_store[task_id].get("events", []),
+        "outputs": task_store[task_id].get("outputs", []),
         "status": task_store[task_id]["status"],
     }
 
@@ -2361,7 +2363,159 @@ async def scout_plan_build_endpoint(request: ScoutPlanBuildRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+
+# ============================================================================
+# ORCH5 — MULTI-TEAM ORCHESTRATION
+# ============================================================================
+
+class MultiTeamRequest(BaseModel):
+    """Run a goal through the multi-team harness (orchestrator -> leads -> workers)."""
+    goal: str = Field(..., min_length=1)
+
+
+def _orch5_event_to_task_event(seq: int, raw: dict) -> dict:
+    """Map a harness event onto the AgentEvent shape the frontend already renders.
+
+    The harness reports plain dicts (it knows nothing about the API server), so
+    the translation lives here rather than in agent_harness.
+    """
+    kind_map = {
+        "agent_start":  "phase",
+        "agent_step":   "agent_step",
+        "tool_calls":   "phase",
+        "file_written": "phase",
+        "team_failed":  "phase",
+        "synthesis":    "synthesis",
+    }
+    role = raw.get("agent_role") or "agent"
+    return {
+        "seq": seq,
+        "timestamp": datetime.now().isoformat(),
+        "kind": kind_map.get(raw.get("kind"), "phase"),
+        "mode": "orch5",
+        "phase": raw.get("phase") or role,
+        # Every event carries its agent: in orch5 the interesting signal is
+        # which of the ten agents is acting at a given moment, so a turn
+        # marker without a name would waste the row.
+        "agent_name": raw.get("agent_id"),
+        "agent_role": role,
+        "agent_origin": "dynamic",
+        "subtask_id": raw.get("team_id"),
+        "batch": None,
+        "depends_on": [],
+        "prompt": raw.get("prompt") or "",
+        "response": raw.get("response") or "",
+        "score": None,
+        "duration_ms": raw.get("duration_ms") or 0,
+    }
+
+
+async def run_multi_team_task(task_id: str, goal: str, gemini_key: str):
+    """Background runner: streams harness progress into task_store."""
+    log_handler = TaskLogHandler(task_id)
+    mega_logger = logging.getLogger("MegaAgenticSystem")
+    mega_logger.addHandler(log_handler)
+
+    started = datetime.now()
+    try:
+        task_store[task_id]["status"] = ExecutionStatus.RUNNING
+        set_usage_label(f"task:{task_id}")
+
+        counter = {"seq": 0}
+
+        def on_event(raw: dict):
+            entry = task_store.get(task_id)
+            if entry is None:
+                return
+            counter["seq"] += 1
+            entry["events"].append(_orch5_event_to_task_event(counter["seq"], raw))
+
+        client = genai.Client(api_key=gemini_key)
+        result = await run_multi_team(goal, client=client, on_event=on_event)
+
+        # Agent cards from the agents that actually reported a completed step.
+        # Cards count completed steps only. Every event now carries an agent
+        # name, so counting all of them would inflate `steps` with turn markers.
+        cards = {}
+        for event in task_store[task_id]["events"]:
+            name = event.get("agent_name")
+            if not name or event.get("kind") != "agent_step":
+                continue
+            card = cards.setdefault(name, {
+                "id": len(cards) + 1,
+                "name": name,
+                "role": event.get("agent_role") or "agent",
+                "origin": "dynamic",
+                "mode": "orch5",
+                "steps": 0,
+                "subtasks": [],
+                "batch": None,
+            })
+            card["steps"] += 1
+            team = event.get("subtask_id")
+            if team and team not in card["subtasks"]:
+                card["subtasks"].append(team)
+        task_store[task_id]["agents"] = list(cards.values())
+
+        elapsed = (datetime.now() - started).total_seconds()
+        task_store[task_id].update({
+            "status": ExecutionStatus.COMPLETED,
+            "mode_used": "orch5",
+            "quality_score": None,
+            "execution_time": elapsed,
+            "agents_involved": len(cards),
+            "iterations": len(result.get("teams", [])),
+            "output": result.get("report", ""),
+            "outputs": result.get("outputs", []),
+            "completed_at": datetime.now().isoformat(),
+            "result": {"metadata": {
+                "mode": "orch5",
+                "teams": result.get("teams", []),
+                "tasks": result.get("tasks", []),
+            }},
+        })
+    except Exception as e:
+        logger.error(f"orch5 task {task_id} failed: {e}", exc_info=True)
+        task_store[task_id].update({
+            "status": ExecutionStatus.FAILED,
+            "error": str(e),
+            "completed_at": datetime.now().isoformat(),
+        })
+    finally:
+        mega_logger.removeHandler(log_handler)
+
+
+@app.post("/orchestrators/multi-team", status_code=202)
+async def multi_team_endpoint(
+    request: MultiTeamRequest,
+    background_tasks: BackgroundTasks,
+    gemini_key: str = Depends(get_gemini_key),
+):
+    """Start an orch5 run. Returns a task_id that polls like any other task.
+
+    Deliberately reuses task_store and the /tasks/{id} + /tasks/{id}/logs
+    endpoints so the existing timeline UI works against it unchanged.
+    """
+    task_id = str(uuid.uuid4())
+    task_store[task_id] = {
+        "task_id": task_id,
+        "status": ExecutionStatus.PENDING,
+        "description": request.goal,
+        "complexity": "critical",
+        "created_at": datetime.now().isoformat(),
+        "completed_at": None,
+        "result": None,
+        "error": None,
+        "logs": [],
+        "agents": [],
+        "events": [],
+        "outputs": [],
+    }
+    background_tasks.add_task(run_multi_team_task, task_id, request.goal, gemini_key)
+    return {"task_id": task_id, "status": ExecutionStatus.PENDING, "mode_used": "orch5"}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8010)
-

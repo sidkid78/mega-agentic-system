@@ -124,12 +124,23 @@ export interface AgentEvent {
   duration_ms: number;
 }
 
+/** A file written by an orch5 worker. The run's workspace is temporary and
+ *  the host filesystem is ephemeral, so contents travel in the response. */
+export interface AgentOutputFile {
+  path: string;
+  team: string;
+  bytes: number;
+  truncated: boolean;
+  content: string;
+}
+
 export interface TaskLogs {
   task_id: string;
   status: string;
   logs: LogEvent[];
   agents: AgentCard[];
   events: AgentEvent[];
+  outputs?: AgentOutputFile[];
 }
 
 export class ApiError extends Error {
@@ -620,6 +631,15 @@ class ApiClient {
     return this.request("/research/grounded", {
       method: "POST",
       body: JSON.stringify({ query }),
+    });
+  }
+
+  /** Start an orch5 multi-team run. Returns a task_id that polls through the
+   *  same /tasks/{id} and /tasks/{id}/logs endpoints as any other task. */
+  async startMultiTeam(goal: string): Promise<{ task_id: string; status: string; mode_used: string }> {
+    return this.request("/orchestrators/multi-team", {
+      method: "POST",
+      body: JSON.stringify({ goal }),
     });
   }
 

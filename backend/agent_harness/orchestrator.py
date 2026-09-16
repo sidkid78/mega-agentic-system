@@ -25,12 +25,22 @@ import time
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Callable, Any
 from google import genai
 from google.genai import types
 
-# ─── Client (picks up GEMINI_API_KEY from env) ───────────────────────────────
-client = genai.Client()
+# ─── Client ──────────────────────────────────────────────────────────────────
+# Built lazily so importing this module never requires a key. Under BYOK the
+# API server injects the caller's client via AgentConfig.client and this
+# env-backed fallback is only used by the standalone demo runner.
+_default_client: Optional[genai.Client] = None
+
+
+def get_default_client() -> genai.Client:
+    global _default_client
+    if _default_client is None:
+        _default_client = genai.Client()
+    return _default_client
 
 # ─── Models ──────────────────────────────────────────────────────────────────
 ORCHESTRATOR_MODEL = "gemini-3.1-pro-preview"  # Deep thinker / planner
@@ -198,6 +208,11 @@ class AgentConfig:
     skills: list[str] = field(default_factory=list)
     workspace: str = "."
     team_id: str = "default"
+    # BYOK: the caller's client. None falls back to the env-backed default.
+    client: Optional[Any] = None
+    # Structured progress callback. Receives plain dicts so this module stays
+    # independent of the API server's event model.
+    on_event: Optional[Callable[[dict], None]] = None
 
 
 class Agent:
@@ -214,6 +229,20 @@ class Agent:
         self.registry = registry
         self.mental_model = MentalModel(config.agent_id, config.workspace)
         self._history: list[types.Content] = []
+
+    def _emit(self, **event) -> None:
+        """Report structured progress, if anyone is listening."""
+        if not self.cfg.on_event:
+            return
+        try:
+            self.cfg.on_event({
+                "agent_id": self.cfg.agent_id,
+                "agent_role": self.cfg.role,
+                "team_id": self.cfg.team_id,
+                **event,
+            })
+        except Exception:
+            pass  # a broken consumer must never break the run
 
     # ── System prompt ────────────────────────────────────────────────────────
     def _build_system_prompt(self) -> str:
@@ -347,10 +376,27 @@ class Agent:
             return json.dumps({"ok": True, "message": "Mental model updated."})
 
         elif name == "write_output":
-            out_dir = Path(self.cfg.workspace) / "outputs" / self.cfg.team_id
+            out_dir = (Path(self.cfg.workspace) / "outputs" / self.cfg.team_id).resolve()
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / args["filename"]
+            out_path = (out_dir / args["filename"]).resolve()
+
+            # Agents are domain-locked, so a filename must not escape the
+            # team's directory via .. or an absolute path.
+            if not out_path.is_relative_to(out_dir):
+                return json.dumps({
+                    "error": f"Refused: {args['filename']} escapes the team directory."
+                })
+
+            # Models routinely ask for nested paths like "tests/test_x.py".
+            # Only the team dir was created before, so every nested write
+            # failed with FileNotFoundError and produced no output at all.
+            out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(args["content"], encoding="utf-8")
+            self._emit(
+                kind="file_written",
+                phase="Wrote file",
+                response=str(out_path.relative_to(out_dir)).replace("\\", "/"),
+            )
             return json.dumps({"ok": True, "path": str(out_path)})
 
         return json.dumps({"error": f"Unknown tool: {name}"})
@@ -363,6 +409,8 @@ class Agent:
         """
         tag = f"[{self.cfg.agent_id}]"
         print(f"\n{tag} Starting on: {message[:80]}...")
+        _started = time.time()
+        self._emit(kind="agent_start", phase=f"{self.cfg.role} starting", prompt=message)
 
         system = self._build_system_prompt()
         self._history.append(
@@ -370,8 +418,9 @@ class Agent:
         )
 
         for turn in range(max_turns):
+            active_client = self.cfg.client or get_default_client()
             response = await asyncio.to_thread(
-                client.models.generate_content,
+                active_client.models.generate_content,
                 model=self.cfg.model,
                 contents=self._history,
                 config=types.GenerateContentConfig(
@@ -406,10 +455,23 @@ class Agent:
                 # Model gave a final text response — we're done
                 final = "\n".join(text_parts)
                 print(f"{tag} Done after {turn+1} turn(s).")
+                self._emit(
+                    kind="agent_step",
+                    phase=f"{self.cfg.role} complete",
+                    prompt=message,
+                    response=final,
+                    turns=turn + 1,
+                    duration_ms=int((time.time() - _started) * 1000),
+                )
                 return final
 
             # Execute all tool calls and feed results back
             print(f"{tag} Turn {turn+1}: calling {[n for n,_ in tool_calls]}")
+            self._emit(
+                kind="tool_calls",
+                phase=f"{self.cfg.role} turn {turn+1}",
+                response=", ".join(n for n, _ in tool_calls),
+            )
             tool_result_parts: list[types.Part] = []
             for tool_name, tool_args in tool_calls:
                 result_str = self._execute_tool(tool_name, tool_args)
