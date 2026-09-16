@@ -1,9 +1,9 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { apiClient, ApiError, type AgentEvent, type TaskResponse } from "@/lib/api"
+import { apiClient, ApiError, type AgentEvent, type AgentOutputFile, type TaskResponse } from "@/lib/api"
 import { MarkdownRenderer } from "@/components/markdown-renderer"
-import { Loader2, Play, Square, ChevronRight, AlertTriangle } from "lucide-react"
+import { Loader2, Play, Square, ChevronRight, AlertTriangle, FileCode } from "lucide-react"
 import type { WorkflowType } from "@/components/workflow-visualizer"
 
 /** Every card on the Workflows page maps to a backend AgentMode.
@@ -11,11 +11,10 @@ import type { WorkflowType } from "@/components/workflow-visualizer"
  *  `hierarchical`. Keep this exhaustive so a new card cannot silently
  *  render a Deploy button that posts an unknown mode. */
 export const WORKFLOW_TO_MODE: Record<WorkflowType, string | null> = {
-  // orch5 describes a MultiTeamOrchestrator that does not exist in the
-  // backend. Deliberately null rather than aliased to hierarchical: pointing
-  // it at a different pattern would run something the diagram above does not
-  // describe, which is worse than saying it is not built yet.
-  orch5: null,
+  // orch5 is the agent_harness multi-team system, not a MegaAgenticSystem
+  // mode. It runs through its own endpoint (see deploy below) but reports
+  // progress and polls exactly like every other pattern.
+  orch5: "orch5",
   chain: "chain",
   routing: "routing",
   parallel: "parallel",
@@ -34,7 +33,7 @@ export const WORKFLOW_TO_MODE: Record<WorkflowType, string | null> = {
 /** A starting prompt per pattern, chosen to show off what the pattern does.
  *  Editable before running — it is a starting point, not a fixed demo. */
 const SUGGESTED_TASK: Record<WorkflowType, string> = {
-  orch5: "",
+  orch5: "Build a small CLI tool that converts CSV to JSON, with tests and a README.",
   chain: "Write onboarding docs for a new engineer joining a FastAPI project.",
   routing: "My Postgres query got slow after I added a few million rows. What now?",
   parallel: "Assess moving a monolith to microservices: cost, risk, timeline, staffing.",
@@ -74,6 +73,7 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
   const [task, setTask] = useState<TaskResponse | null>(null)
   const [events, setEvents] = useState<AgentEvent[]>([])
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  const [outputs, setOutputs] = useState<AgentOutputFile[]>([])
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const streamRef = useRef<HTMLDivElement>(null)
@@ -86,11 +86,16 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
     setTask(null)
     setEvents([])
     setExpanded(new Set())
+    setOutputs([])
     setError(null)
   }, [workflow])
 
   const mode = WORKFLOW_TO_MODE[workflow]
   const isRunning = task?.status === "pending" || task?.status === "running"
+  // A run exists the moment the POST returns, before the first poll has told
+  // us its status. Without this the Deploy button re-enables in that gap and
+  // a second click would start a duplicate run.
+  const isBusy = starting || isRunning || (taskId !== null && task === null)
 
   useEffect(() => {
     if (!taskId) return
@@ -108,6 +113,7 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
         if (cancelled) return
         setTask(t)
         setEvents(logs.events ?? [])
+        setOutputs(logs.outputs ?? [])
       } catch (e) {
         if (!(e instanceof ApiError && e.status === 404)) {
           console.error("Workflow poll failed:", e)
@@ -133,15 +139,20 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
     setError(null)
     setEvents([])
     setTask(null)
+    setOutputs([])
     setExpanded(new Set())
     try {
-      const created = await apiClient.createTask({
-        description: description.trim(),
-        complexity: "moderate",
-        preferred_mode: mode as never,
-      })
+      // orch5 is a separate system (async, multi-team, writes files), so it
+      // has its own entry point. It still returns a task_id that polls
+      // through the same endpoints, so everything below is unchanged.
+      const created = workflow === "orch5"
+        ? await apiClient.startMultiTeam(description.trim())
+        : await apiClient.createTask({
+            description: description.trim(),
+            complexity: "moderate",
+            preferred_mode: mode as never,
+          })
       setTaskId(created.task_id)
-      setTask(created)
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not start this run")
     } finally {
@@ -185,17 +196,17 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           rows={3}
-          disabled={isRunning}
+          disabled={isBusy}
           className="w-full rounded-xl border border-zinc-200/50 dark:border-zinc-800/50 bg-white/5 px-3 py-2 text-sm leading-snug resize-y focus:outline-none focus:ring-2 focus:ring-indigo-500/50 disabled:opacity-60"
         />
       </div>
 
       <button
         onClick={deploy}
-        disabled={starting || isRunning || !description.trim()}
+        disabled={isBusy || !description.trim()}
         className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:hover:bg-indigo-600 text-white text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2"
       >
-        {starting || isRunning ? (
+        {isBusy ? (
           <><Loader2 className="w-4 h-4 animate-spin" />{isRunning ? "Running…" : "Starting…"}</>
         ) : (
           <><Play className="w-4 h-4" />Deploy {title}</>
@@ -308,6 +319,28 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
               waiting for next step…
             </div>
           )}
+        </div>
+      )}
+
+      {outputs.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">
+            Files written ({outputs.length})
+          </p>
+          {outputs.map((file) => (
+            <details key={file.path} className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.03] px-3 py-2">
+              <summary className="cursor-pointer flex items-center gap-2 text-xs">
+                <FileCode className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+                <span className="font-mono text-zinc-800 dark:text-zinc-100 truncate">{file.path}</span>
+                <span className="ml-auto shrink-0 text-[10px] text-zinc-400">
+                  {(file.bytes / 1024).toFixed(1)} KB{file.truncated ? " · truncated" : ""}
+                </span>
+              </summary>
+              <pre className="mt-2 max-h-80 overflow-auto rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-[11px] leading-snug whitespace-pre">
+                {file.content}
+              </pre>
+            </details>
+          ))}
         </div>
       )}
 
