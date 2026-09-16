@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .harness import AgentHarness, TeamSpec, WorkerSpec
-from .orchestrator import ORCHESTRATOR_MODEL, get_default_client
+from .orchestrator import ORCHESTRATOR_MODEL, PLANNER_THINKING, get_default_client
 
 logger = logging.getLogger("MegaAgenticSystem")
 
@@ -91,7 +91,12 @@ async def plan_teams(
         active.models.generate_content,
         model=ORCHESTRATOR_MODEL,
         contents=PLANNING_PROMPT.format(goal=goal),
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            # Without this the Pro model plans at its own default, which put
+            # team planning alone at tens of seconds.
+            thinking_config=types.ThinkingConfig(thinking_level=PLANNER_THINKING),
+        ),
     )
 
     specs: List[TeamSpec] = []
