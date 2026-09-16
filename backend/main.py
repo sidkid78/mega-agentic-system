@@ -400,6 +400,76 @@ def generate_music(
             pass
 
 
+def search_google_maps(
+    query: str,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    client=None,
+) -> dict:
+    """Answer a location-aware query grounded in Google Maps.
+
+    Unlike Google Search grounding, Maps grounding runs through the
+    Interactions API (client.interactions.create), not generate_content, and
+    needs google-genai >= 2.0.0. Latitude/longitude are optional and only
+    influence local phrasing ("near me"); specific or non-local queries are
+    largely unaffected by them.
+
+    Returns {answer, places, used_location}. Places are deduplicated by
+    place_id - the API emits one annotation per citation span, so a single
+    cafe mentioned four times arrives as four identical annotations.
+    """
+    client = client or create_client()
+
+    tool: Dict[str, Any] = {"type": "google_maps"}
+    if latitude is not None and longitude is not None:
+        tool["latitude"] = latitude
+        tool["longitude"] = longitude
+
+    interaction = client.interactions.create(
+        model=DEFAULT_MODEL,
+        input=query,
+        tools=[tool],
+    )
+
+    answer = ""
+    places: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    for step in interaction.steps:
+        if getattr(step, "type", None) != "model_output":
+            continue
+        for block in step.content:
+            if getattr(block, "type", None) != "text":
+                continue
+            answer += block.text or ""
+            for ann in (getattr(block, "annotations", None) or []):
+                if getattr(ann, "type", None) != "place_citation":
+                    continue
+                place_id = getattr(ann, "place_id", None)
+                key = place_id or getattr(ann, "url", None)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                # The API appends " - Google Maps" to every place name.
+                name = (getattr(ann, "name", None) or "").removesuffix(" - Google Maps")
+                places.append({
+                    "name": name,
+                    "place_id": place_id,
+                    "url": getattr(ann, "url", None) or "",
+                })
+
+    try:
+        usage_tracker.record(DEFAULT_MODEL, interaction)
+    except Exception:
+        pass  # usage accounting must never break a lookup
+
+    return {
+        "answer": answer,
+        "places": places,
+        "used_location": latitude is not None and longitude is not None,
+    }
+
+
 def research_with_grounding(query: str, client=None) -> dict:
     """Use Google Search Grounding for up-to-date information"""
     client = client or create_client()
