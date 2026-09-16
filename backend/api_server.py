@@ -248,6 +248,10 @@ class AgentModeEnum(str, Enum):
     META_LEARNING = "meta_learning"
     BACKGROUND = "background"
     SOCRATIC = "socratic"
+    CHAIN = "chain"
+    ROUTING = "routing"
+    PARALLEL = "parallel"
+    EVALUATOR = "evaluator"
 
 
 class TaskCreate(BaseModel):
@@ -609,6 +613,10 @@ async def create_task(task_data: TaskCreate, background_tasks: BackgroundTasks,
         AgentModeEnum.META_LEARNING: AgentMode.META_LEARNING,
         AgentModeEnum.BACKGROUND: AgentMode.BACKGROUND,
         AgentModeEnum.SOCRATIC: AgentMode.SOCRATIC,
+        AgentModeEnum.CHAIN: AgentMode.CHAIN,
+        AgentModeEnum.ROUTING: AgentMode.ROUTING,
+        AgentModeEnum.PARALLEL: AgentMode.PARALLEL,
+        AgentModeEnum.EVALUATOR: AgentMode.EVALUATOR,
     }
     
     # Create task
