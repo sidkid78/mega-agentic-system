@@ -152,6 +152,7 @@ from main import (
     search_pubmed,
     search_wikipedia,
     research_with_grounding,
+    search_google_maps,
     generate_music,
     usage_tracker,
     set_usage_label,
@@ -1646,6 +1647,37 @@ async def grounded_query_endpoint(request: GroundedQueryRequest, ai_client: gena
     """Answer a query using Gemini with Google Search grounding."""
     try:
         result = research_with_grounding(request.query, client=ai_client)
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class MapsQueryRequest(BaseModel):
+    """Gemini Google-Maps-grounded location query."""
+    query: str
+    latitude:  Optional[float] = Field(default=None, ge=-90,  le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+
+
+@app.post("/research/maps")
+async def maps_query_endpoint(request: MapsQueryRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+    """Answer a location query using Gemini with Google Maps grounding.
+
+    Coordinates are optional; supply both or neither. They mainly affect
+    "near me" style phrasing - a named-place query works without them.
+    """
+    if (request.latitude is None) != (request.longitude is None):
+        raise HTTPException(
+            status_code=422,
+            detail="Provide both latitude and longitude, or neither.",
+        )
+    try:
+        result = search_google_maps(
+            request.query,
+            latitude=request.latitude,
+            longitude=request.longitude,
+            client=ai_client,
+        )
         return {"success": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

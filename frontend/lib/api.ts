@@ -623,6 +623,23 @@ class ApiClient {
     });
   }
 
+  /** Location-aware query grounded in Google Maps.
+   *  Coordinates are optional - pass both or neither. They mainly influence
+   *  "near me" style queries; a named-place query works without them. */
+  async mapsQuery(query: string, latitude?: number, longitude?: number): Promise<{
+    success: boolean;
+    result: {
+      answer?: string;
+      places?: Array<{ name: string; place_id: string | null; url: string }>;
+      used_location?: boolean;
+    };
+  }> {
+    return this.request("/research/maps", {
+      method: "POST",
+      body: JSON.stringify({ query, latitude, longitude }),
+    });
+  }
+
   // ===== RAG knowledge base =====
   async ragAddDocuments(
     documents: string[],
