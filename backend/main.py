@@ -325,6 +325,7 @@ def generate_music(
     """
     import base64
 
+    own_client = client is None
     client = client or create_client()
     try:
         config_kwargs: dict = {}
@@ -394,14 +395,20 @@ def generate_music(
             "model_used": model,
         }
     finally:
-        try:
-            client.close()
-        except Exception:
-            pass
+        if own_client:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 def research_with_grounding(query: str, client=None) -> dict:
     """Use Google Search Grounding for up-to-date information"""
+    # Only close a client we created. The ResearchAssistant binds this tool to
+    # its own long-lived, per-key client: closing that killed the whole chat
+    # session, and every later message failed with "Cannot send a request, as
+    # the client has been closed."
+    own_client = client is None
     client = client or create_client()
     try:
         response = gemini_generate(
@@ -437,7 +444,8 @@ def research_with_grounding(query: str, client=None) -> dict:
             'sources': sources,
         }
     finally:
-        try:
-            client.close()
-        except Exception:
-            pass
+        if own_client:
+            try:
+                client.close()
+            except Exception:
+                pass
