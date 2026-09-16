@@ -33,10 +33,11 @@ from google import genai
 from google.genai import types
 
 try:
-    from main import DEFAULT_MODEL, COMPLEX_MODEL
+    from main import DEFAULT_MODEL, COMPLEX_MODEL, LITE_MODEL
 except ImportError:  # standalone use without the API server package
     DEFAULT_MODEL = "gemini-3.5-flash"
     COMPLEX_MODEL = "gemini-3.1-pro-preview"
+    LITE_MODEL = "gemini-3.1-flash-lite"
 
 try:
     from rich.console import Console as _RichConsole
@@ -98,6 +99,11 @@ class AgentMode(Enum):
     META_LEARNING = "meta_learning"
     BACKGROUND = "background"
     SOCRATIC = "socratic"
+    # Building-block patterns (the Workflows page renders these as cards)
+    CHAIN = "chain"
+    ROUTING = "routing"
+    PARALLEL = "parallel"
+    EVALUATOR = "evaluator"
 
 
 # ============================================================================
@@ -218,6 +224,10 @@ class MegaAgenticSystem:
         AgentMode.META_LEARNING: [TaskComplexity.COMPLEX, TaskComplexity.CRITICAL],
         AgentMode.BACKGROUND:    [TaskComplexity.SIMPLE, TaskComplexity.MODERATE],
         AgentMode.SOCRATIC:      [TaskComplexity.SIMPLE, TaskComplexity.MODERATE],
+        AgentMode.CHAIN:         [TaskComplexity.SIMPLE, TaskComplexity.MODERATE],
+        AgentMode.ROUTING:       [TaskComplexity.SIMPLE, TaskComplexity.MODERATE],
+        AgentMode.PARALLEL:      [TaskComplexity.MODERATE, TaskComplexity.COMPLEX, TaskComplexity.CRITICAL],
+        AgentMode.EVALUATOR:     [TaskComplexity.MODERATE, TaskComplexity.COMPLEX],
     }
 
     def __init__(self, name: str = "MegaSystem", api_key: Optional[str] = None):
@@ -379,7 +389,14 @@ class MegaAgenticSystem:
         with open(path, "rb") as f:
             state = pickle.load(f)
         self.execution_history = state.get("execution_history", [])
-        self.performance_metrics = state.get("performance_metrics", self.performance_metrics)
+        # Merge rather than replace: a pickle written before a mode existed has
+        # no entry for it, and _select_mode indexes every mode in AgentMode.
+        # Replacing wholesale would KeyError the moment a new mode is added.
+        for mode_key, metrics in (state.get("performance_metrics") or {}).items():
+            if mode_key in self.performance_metrics:
+                self.performance_metrics[mode_key] = metrics
+            else:
+                logger.info(f"Ignoring metrics for unknown mode '{mode_key}' in saved state")
         loaded_agents = state.get("agents", [])
         if loaded_agents:
             self.agents = loaded_agents
@@ -401,6 +418,10 @@ class MegaAgenticSystem:
             AgentMode.META_LEARNING: "The system selects its strategy based on patterns learned from past executions.",
             AgentMode.BACKGROUND:    "Tasks are queued and processed asynchronously without blocking the caller.",
             AgentMode.SOCRATIC:      "A Socratic questioner guides the agent to the answer through targeted questions.",
+            AgentMode.CHAIN:         "A fixed pipeline where each stage consumes the previous stage's output.",
+            AgentMode.ROUTING:       "A cheap classifier picks one specialist, and only that specialist runs.",
+            AgentMode.PARALLEL:      "Splits the task into independent sub-questions, answers them concurrently, aggregates once.",
+            AgentMode.EVALUATOR:     "A generator produces, a separate evaluator grades against a rubric and returns PASS or REVISE.",
         }
         return descriptions.get(mode, "")
 
@@ -415,6 +436,10 @@ class MegaAgenticSystem:
             AgentMode.META_LEARNING: ["Recurring task types", "Adaptive systems", "Performance tuning"],
             AgentMode.BACKGROUND:    ["Long-running jobs", "Batch tasks", "Non-blocking operations"],
             AgentMode.SOCRATIC:      ["Exploration", "Learning", "Clarifying ambiguous requirements"],
+            AgentMode.CHAIN:         ["Summarize then translate", "Outline then draft then edit", "Staged content refinement"],
+            AgentMode.ROUTING:       ["Support triage", "Multi-language handling", "Picking a domain expert cheaply"],
+            AgentMode.PARALLEL:      ["Multi-source research", "Auditing several files at once", "Independent sub-analyses"],
+            AgentMode.EVALUATOR:     ["Work with clear acceptance criteria", "Draft-and-grade loops", "Spec compliance"],
         }
         return use_cases.get(mode, [])
 
@@ -479,6 +504,10 @@ class MegaAgenticSystem:
             AgentMode.META_LEARNING: self._meta_learning,
             AgentMode.BACKGROUND:    self._background,
             AgentMode.SOCRATIC:      self._socratic,
+            AgentMode.CHAIN:         self._chain,
+            AgentMode.ROUTING:       self._routing,
+            AgentMode.PARALLEL:      self._parallel,
+            AgentMode.EVALUATOR:     self._evaluator,
         }
         fn = dispatch.get(mode, self._hierarchical)
         return fn(task)
@@ -714,8 +743,34 @@ class MegaAgenticSystem:
             )
         if mode == AgentMode.META_LEARNING:
             return [], "Delegates to the best-performing mode; agents are that mode's."
+        if mode == AgentMode.CHAIN:
+            return (
+                [self._inline_agent(60 + i, role, spec)
+                 for i, (role, spec, _) in enumerate(self._CHAIN_STAGES, start=1)],
+                "Fixed pipeline - each stage receives the previous stage's output.",
+            )
+        if mode == AgentMode.ROUTING:
+            roster = [("Router", "Classifies work and dispatches it")] + list(self._ROUTES.values())
+            return (
+                [self._inline_agent(70 + i, r, s) for i, (r, s) in enumerate(roster)],
+                "Router plus the candidate specialists - exactly ONE specialist runs per task.",
+            )
+        if mode == AgentMode.PARALLEL:
+            width = {
+                TaskComplexity.SIMPLE: 2, TaskComplexity.MODERATE: 3,
+                TaskComplexity.COMPLEX: 4, TaskComplexity.CRITICAL: 5,
+            }.get(complexity, 3)
+            return (
+                [self._inline_agent(80, "Splitter", "Divides work into independent pieces")],
+                f"Splitter plus {width} workers named at runtime, one per independent sub-question.",
+            )
 
         rosters = {
+            AgentMode.EVALUATOR: [
+                ("Rubric Author", "Defines acceptance criteria"),
+                ("Generator", "Produces candidate answers"),
+                ("Evaluator", "Grades against the rubric"),
+            ],
             AgentMode.DEBATE: [
                 ("Proposer", "Argues for a position"),
                 ("Opposer", "Attacks the proposition"),
@@ -1088,10 +1143,14 @@ class MegaAgenticSystem:
         system: str,
         thinking: bool = False,
         score: Optional[float] = None,
+        model: Optional[str] = None,
+        json_schema: bool = False,
     ) -> str:
         """Run one inline-agent step and emit it. Returns the response."""
         started = time.time()
-        response = self._call_model(prompt, system=system, thinking=thinking)
+        response = self._call_model(
+            prompt, system=system, thinking=thinking, model=model, json_schema=json_schema,
+        )
         self._emit(
             kind="agent_step", mode=mode, phase=phase, agent=agent,
             agent_origin="inline", prompt=prompt, response=response, score=score,
@@ -1299,6 +1358,287 @@ class MegaAgenticSystem:
         quality = self._score_output(task.description, synthesis)
         self._emit(kind="score", mode=mode, phase="Scored", score=quality)
         return synthesis, quality, 1
+
+
+    # ---- Chain: strictly sequential, each stage consumes the last ----------
+
+    _CHAIN_STAGES = [
+        ("Outliner",  "Structures the work before any prose is written",
+         "Produce a tight outline of what a complete answer must contain. "
+         "Headings and one line each - no prose yet."),
+        ("Drafter",   "Turns an outline into a full draft",
+         "Write the full draft that fills out the outline above. Cover every point."),
+        ("Editor",    "Tightens and corrects the draft",
+         "Edit the draft: cut repetition, fix inaccuracies, tighten wording. "
+         "Return the improved version in full, not a list of edits."),
+    ]
+
+    def _chain(self, task: Task) -> Tuple[str, float, int]:
+        """Prompt chaining: a fixed pipeline where each stage's output is the
+        next stage's input. The defining property is that no stage sees the
+        original task alone - it sees what the previous stage produced."""
+        mode = AgentMode.CHAIN.value
+        carried = ""
+
+        for i, (role, spec, instruction) in enumerate(self._CHAIN_STAGES, start=1):
+            agent = self._inline_agent(60 + i, role, spec)
+            if carried:
+                prompt = (
+                    f"TASK: {task.description}\n\n"
+                    f"OUTPUT OF THE PREVIOUS STAGE:\n{carried}\n\n{instruction}"
+                )
+            else:
+                prompt = f"TASK: {task.description}\n\n{instruction}"
+
+            carried = self._step(
+                mode, f"Stage {i}/{len(self._CHAIN_STAGES)} - {role}", agent,
+                prompt,
+                f"You are the {role} in a prompt chain. {spec}.",
+                thinking=(i > 1),
+            )
+
+        quality = self._score_output(task.description, carried)
+        self._emit(kind="score", mode=mode, phase="Scored", score=quality)
+        return carried, quality, len(self._CHAIN_STAGES)
+
+    # ---- Routing: classify, then hand to one specialist --------------------
+
+    _ROUTES = {
+        "technical":  ("Engineer",        "Implementation, systems and code"),
+        "analytical": ("Analyst",         "Data, trade-offs and quantitative reasoning"),
+        "creative":   ("Creative Lead",   "Ideation, naming and narrative"),
+        "factual":    ("Researcher",      "Established facts and definitions"),
+        "advisory":   ("Advisor",         "Recommendations and judgement calls"),
+    }
+
+    def _routing(self, task: Task) -> Tuple[str, float, int]:
+        """Intelligent routing: a cheap classifier picks one specialist, and
+        only that specialist runs. The saving is the point - the other routes
+        cost nothing."""
+        mode = AgentMode.ROUTING.value
+        router = self._inline_agent(70, "Router", "Classifies work and dispatches it")
+
+        options = "\n".join(f"  {k}: {v[1]}" for k, v in self._ROUTES.items())
+        raw = self._step(
+            mode, "Classification", router,
+            f"Classify this task into exactly one category.\n\nTASK: {task.description}\n\n"
+            f"CATEGORIES:\n{options}\n\n"
+            'Respond ONLY with JSON: {"category": "<key>", "reason": "<one sentence>"}',
+            "You are a routing classifier. Output strict JSON.",
+            model=LITE_MODEL,   # the classifier is the cheap half of this pattern
+            json_schema=True,
+        )
+
+        category, reason = "advisory", "Defaulted: classifier output unreadable."
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                parsed = parsed[0] if parsed else {}
+            candidate = str(parsed.get("category", "")).strip().lower()
+            if candidate in self._ROUTES:
+                category = candidate
+                reason = str(parsed.get("reason", "")) or reason
+        except (ValueError, AttributeError, json.JSONDecodeError) as exc:
+            logger.warning(f"Routing classification unparseable ({exc}); using {category}")
+
+        role, spec = self._ROUTES[category]
+        self._emit(
+            kind="phase", mode=mode, phase="Routed",
+            response=f"category={category} -> {role}\n{reason}",
+        )
+
+        specialist = self._inline_agent(71, role, spec)
+        answer = self._step(
+            mode, f"Specialist - {category}", specialist,
+            f"Answer this task within your specialisation.\n\nTASK: {task.description}",
+            f"You are a {role}. {spec}. Give a complete, expert answer.",
+            thinking=True,
+        )
+        quality = self._score_output(task.description, answer)
+        self._emit(kind="score", mode=mode, phase="Scored", score=quality)
+        return answer, quality, 1
+
+    # ---- Parallel: independent fan-out, single aggregation -----------------
+
+    PARALLEL_MAX_WORKERS = 5
+
+    def _parallel(self, task: Task) -> Tuple[str, float, int]:
+        """Parallel execution: split into genuinely independent sub-questions,
+        answer them concurrently, aggregate once.
+
+        Distinct from hierarchical (which schedules dependency batches) and
+        from swarm (where every agent answers the same question from a
+        different angle). Here each worker owns a different piece.
+        """
+        mode = AgentMode.PARALLEL.value
+        planner = self._inline_agent(80, "Splitter", "Divides work into independent pieces")
+
+        width = {
+            TaskComplexity.SIMPLE: 2, TaskComplexity.MODERATE: 3,
+            TaskComplexity.COMPLEX: 4, TaskComplexity.CRITICAL: 5,
+        }.get(task.complexity, 3)
+
+        raw = self._step(
+            mode, "Split", planner,
+            f"Split this task into exactly {width} sub-questions that can be answered "
+            f"INDEPENDENTLY - no sub-question may need another's answer.\n\n"
+            f"TASK: {task.description}\n\n"
+            'Respond ONLY with JSON: {"parts": [{"title": "...", "question": "..."}]}',
+            "You are a work splitter. Output strict JSON. Independence is mandatory.",
+            thinking=True,
+            json_schema=True,
+        )
+
+        parts: List[Dict[str, str]] = []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                parsed = parsed[0] if parsed else {}
+            for item in parsed.get("parts", []):
+                q = str(item.get("question", "")).strip()
+                if q:
+                    parts.append({"title": str(item.get("title", q[:40])), "question": q})
+        except (ValueError, AttributeError, json.JSONDecodeError) as exc:
+            logger.warning(f"Parallel split unparseable ({exc}); falling back to one part")
+        if not parts:
+            parts = [{"title": "Whole task", "question": task.description}]
+
+        def run_part(index_part):
+            index, part = index_part
+            agent = self._inline_agent(81 + index, part["title"][:40] or f"Worker {index+1}",
+                                       "Answers one independent sub-question")
+            started = time.time()
+            prompt = (
+                f"OVERALL TASK: {task.description}\n\n"
+                f"YOUR SUB-QUESTION: {part['question']}\n\n"
+                "Answer only your sub-question, completely."
+            )
+            response = self._call_model(
+                prompt,
+                system=f"You are working on one independent piece of a larger task: {part['title']}.",
+            )
+            self._emit(
+                kind="agent_step", mode=mode, phase="Parallel worker",
+                agent=agent, agent_origin="inline", batch=1,
+                subtask_id=part["title"][:40],
+                prompt=prompt, response=response,
+                duration_ms=int((time.time() - started) * 1000),
+            )
+            return part["title"], response
+
+        self._emit(
+            kind="phase", mode=mode, phase="Fan-out", batch=1,
+            response=f"{len(parts)} independent parts in parallel: "
+                     + ", ".join(p["title"] for p in parts),
+        )
+
+        results: List[Tuple[str, str]] = []
+        with ThreadPoolExecutor(max_workers=min(len(parts), self.PARALLEL_MAX_WORKERS)) as pool:
+            futures = [pool.submit(run_part, (i, p)) for i, p in enumerate(parts)]
+            for future in as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    logger.error(f"Parallel worker failed: {exc}")
+
+        assembled = "\n\n".join(f"### {title}\n{body}" for title, body in results)
+        started = time.time()
+        aggregate = self._call_model(
+            f"Aggregate these independently-answered parts into one coherent response.\n\n"
+            f"TASK: {task.description}\n\n{assembled}",
+            system="You are an aggregator. Merge the parts, remove overlap, keep everything useful.",
+            thinking=True,
+        )
+        quality = self._score_output(task.description, aggregate)
+        self._emit(
+            kind="synthesis", mode=mode, phase="Aggregation",
+            prompt=f"Merging {len(results)} independent answers",
+            response=aggregate, score=quality,
+            duration_ms=int((time.time() - started) * 1000),
+        )
+        return aggregate, quality, 1
+
+    # ---- Evaluator-optimizer: generate, grade against a rubric, revise -----
+
+    def _evaluator(self, task: Task) -> Tuple[str, float, int]:
+        """Evaluator-optimizer: a generator produces, a separate evaluator
+        grades against explicit criteria and returns PASS or REVISE.
+
+        Differs from reflective in that the evaluator is a distinct agent
+        applying a rubric it wrote up front, and the loop exits on an explicit
+        verdict rather than on a self-assigned score.
+        """
+        mode = AgentMode.EVALUATOR.value
+        rubric_author = self._inline_agent(90, "Rubric Author", "Defines acceptance criteria")
+        generator = self._inline_agent(91, "Generator", "Produces candidate answers")
+        evaluator = self._inline_agent(92, "Evaluator", "Grades against the rubric")
+
+        rubric = self._step(
+            mode, "Rubric", rubric_author,
+            f"List 3-5 concrete, checkable acceptance criteria for a good answer to:\n"
+            f"{task.description}\n\nNumbered list, one line each.",
+            "You define acceptance criteria. Be specific and checkable.",
+            thinking=True,
+        )
+
+        candidate = self._step(
+            mode, "Candidate 1", generator,
+            f"Produce a complete answer to:\n{task.description}\n\n"
+            f"It will be graded against:\n{rubric}",
+            "You are the generator. Satisfy every criterion.",
+        )
+
+        iterations = 1
+        rounds = max(1, min(task.max_iterations, 3))
+        for i in range(rounds):
+            verdict_raw = self._step(
+                mode, f"Evaluation {i+1}", evaluator,
+                f"Grade this answer against the criteria.\n\nTASK: {task.description}\n\n"
+                f"CRITERIA:\n{rubric}\n\nANSWER:\n{candidate}\n\n"
+                'Respond ONLY with JSON: {"verdict": "PASS" or "REVISE", '
+                '"score": <0-10>, "failing": ["..."], "guidance": "what to change"}',
+                "You are a strict evaluator. Output strict JSON.",
+                thinking=True,
+                json_schema=True,
+            )
+
+            verdict, guidance, score = "REVISE", "", None
+            try:
+                parsed = json.loads(verdict_raw)
+                if isinstance(parsed, list):
+                    parsed = parsed[0] if parsed else {}
+                verdict = str(parsed.get("verdict", "REVISE")).upper()
+                guidance = str(parsed.get("guidance", ""))
+                failing = parsed.get("failing") or []
+                if failing:
+                    guidance = guidance + "\n\nFailing criteria:\n" + "\n".join(f"- {f}" for f in failing)
+                score = float(parsed.get("score")) if parsed.get("score") is not None else None
+            except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+                logger.warning(f"Evaluator verdict unparseable ({exc}); revising once more")
+
+            self._emit(
+                kind="score", mode=mode, phase=f"Verdict {i+1}",
+                score=score, response=f"{verdict}\n{guidance}".strip(),
+            )
+
+            if verdict == "PASS":
+                break
+            if i == rounds - 1:
+                break   # out of budget; keep the last candidate
+
+            candidate = self._step(
+                mode, f"Candidate {i+2}", generator,
+                f"Revise your answer using the evaluator's guidance.\n\n"
+                f"TASK: {task.description}\n\nCRITERIA:\n{rubric}\n\n"
+                f"GUIDANCE:\n{guidance}\n\nCURRENT ANSWER:\n{candidate}",
+                "You are the generator. Address every failing criterion.",
+                thinking=True,
+            )
+            iterations += 1
+
+        quality = self._score_output(task.description, candidate)
+        self._emit(kind="score", mode=mode, phase="Final score", score=quality)
+        return candidate, quality, iterations
 
     # -----------------------------------------------------------------------
     # METRICS RECORDING

@@ -4,6 +4,7 @@ import React, { useState } from "react"
 import { motion } from "framer-motion"
 import { WorkflowVisualizer, WorkflowType } from "@/components/workflow-visualizer"
 import { WorkflowCard } from "@/components/workflow-card"
+import { WorkflowRunner, WORKFLOW_TO_MODE } from "@/components/workflow-runner"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { 
@@ -268,26 +269,15 @@ export default function WorkflowsPage() {
               <WorkflowCard {...WORKFLOW_DATA[activeType]} />
             </motion.div>
 
-            {/* Quick Actions / Integration */}
+            {/* Run this pattern against the live orchestrator */}
             <div className="glass-card p-6 rounded-2xl border border-zinc-200/50 dark:border-zinc-800/50 space-y-4">
-              <h4 className="text-xs font-bold uppercase tracking-widest text-zinc-400">Toolkit Integration</h4>
-              <div className="grid grid-cols-2 gap-3">
-                <button className="flex flex-col items-center justify-center p-4 rounded-xl border border-zinc-200/50 dark:border-zinc-800/50 hover:bg-white/5 transition-all group">
-                  <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center mb-2 group-hover:scale-110 transition-transform">
-                    <Zap className="w-4 h-4 text-indigo-500" />
-                  </div>
-                  <span className="text-[10px] font-bold text-zinc-500 group-hover:text-white transition-colors">API Keys</span>
-                </button>
-                <button className="flex flex-col items-center justify-center p-4 rounded-xl border border-zinc-200/50 dark:border-zinc-800/50 hover:bg-white/5 transition-all group">
-                  <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center mb-2 group-hover:scale-110 transition-transform">
-                    <Layers className="w-4 h-4 text-emerald-500" />
-                  </div>
-                  <span className="text-[10px] font-bold text-zinc-500 group-hover:text-white transition-colors">Templates</span>
-                </button>
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold uppercase tracking-widest text-zinc-400">Run This Pattern</h4>
+                <span className="text-[10px] font-mono text-zinc-500">
+                  {WORKFLOW_TO_MODE[activeType] ?? "unimplemented"}
+                </span>
               </div>
-              <button className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2">
-                Deploy Selected Pattern
-              </button>
+              <WorkflowRunner workflow={activeType} title={WORKFLOW_DATA[activeType].title} />
             </div>
           </div>
         </div>
