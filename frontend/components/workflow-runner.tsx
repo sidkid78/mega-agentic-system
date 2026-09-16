@@ -184,7 +184,7 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
           id="workflow-task"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          rows={3}
+          rows={2}
           disabled={isRunning}
           className="w-full rounded-xl border border-zinc-200/50 dark:border-zinc-800/50 bg-white/5 px-3 py-2 text-sm leading-snug resize-y focus:outline-none focus:ring-2 focus:ring-indigo-500/50 disabled:opacity-60"
         />
@@ -222,7 +222,7 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
       )}
 
       {events.length > 0 && (
-        <div ref={streamRef} className="max-h-96 overflow-y-auto space-y-1.5 pr-1 scroll-smooth">
+        <div ref={streamRef} className="max-h-[36rem] overflow-y-auto space-y-1.5 pr-1 scroll-smooth">
           {events.map((event) => {
             const style = KIND_STYLE[event.kind] ?? KIND_STYLE.phase
             const open = expanded.has(event.seq)
@@ -278,7 +278,7 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
                     {event.prompt && (
                       <div>
                         <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-1">Prompt</p>
-                        <pre className="whitespace-pre-wrap break-words rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-[11px] leading-snug max-h-48 overflow-y-auto">
+                        <pre className="whitespace-pre-wrap break-words rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-[11px] leading-snug">
                           {event.prompt}
                         </pre>
                       </div>
@@ -287,11 +287,11 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
                       <div>
                         <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-1">Response</p>
                         {event.kind === "decompose" ? (
-                          <pre className="whitespace-pre-wrap break-words rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-[11px] leading-snug max-h-80 overflow-y-auto">
+                          <pre className="whitespace-pre-wrap break-words rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-[11px] leading-snug">
                             {event.response}
                           </pre>
                         ) : (
-                          <div className="rounded bg-zinc-100 dark:bg-zinc-900 p-3 max-h-80 overflow-y-auto prose prose-sm dark:prose-invert max-w-none prose-p:my-2 prose-headings:my-2 prose-headings:text-sm prose-ul:my-2 prose-li:my-0.5">
+                          <div className="rounded bg-zinc-100 dark:bg-zinc-900 p-3 prose prose-sm dark:prose-invert max-w-none prose-p:my-2 prose-headings:my-2 prose-headings:text-sm prose-ul:my-2 prose-li:my-0.5">
                             <MarkdownRenderer>{event.response}</MarkdownRenderer>
                           </div>
                         )}
@@ -316,7 +316,7 @@ export function WorkflowRunner({ workflow, title }: WorkflowRunnerProps) {
           <summary className="cursor-pointer text-[10px] font-bold uppercase tracking-widest text-zinc-400">
             Final output
           </summary>
-          <div className="mt-3 max-h-96 overflow-y-auto prose prose-sm dark:prose-invert max-w-none">
+          <div className="mt-3 prose prose-sm dark:prose-invert max-w-none">
             <MarkdownRenderer>{task.output}</MarkdownRenderer>
           </div>
         </details>

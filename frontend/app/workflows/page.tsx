@@ -256,6 +256,20 @@ export default function WorkflowsPage() {
                  </TabsList>
                </Tabs>
             </div>
+
+            {/* Run this pattern against the live orchestrator.
+                Lives in the wide column: a run produces agent prompts,
+                responses and whole source files, which are unreadable in a
+                narrow sidebar behind nested scrollbars. */}
+            <div className="glass-card p-6 rounded-2xl border border-zinc-200/50 dark:border-zinc-800/50 space-y-4">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold uppercase tracking-widest text-zinc-400">Run This Pattern</h4>
+                <span className="text-[10px] font-mono text-zinc-500">
+                  {WORKFLOW_TO_MODE[activeType] ?? "unimplemented"}
+                </span>
+              </div>
+              <WorkflowRunner workflow={activeType} title={WORKFLOW_DATA[activeType].title} />
+            </div>
           </div>
 
           {/* Sidebar / Info Area */}
@@ -269,16 +283,6 @@ export default function WorkflowsPage() {
               <WorkflowCard {...WORKFLOW_DATA[activeType]} />
             </motion.div>
 
-            {/* Run this pattern against the live orchestrator */}
-            <div className="glass-card p-6 rounded-2xl border border-zinc-200/50 dark:border-zinc-800/50 space-y-4">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-bold uppercase tracking-widest text-zinc-400">Run This Pattern</h4>
-                <span className="text-[10px] font-mono text-zinc-500">
-                  {WORKFLOW_TO_MODE[activeType] ?? "unimplemented"}
-                </span>
-              </div>
-              <WorkflowRunner workflow={activeType} title={WORKFLOW_DATA[activeType].title} />
-            </div>
           </div>
         </div>
       </div>
