@@ -721,6 +721,8 @@ class ApiClient {
     form.append("file", file);
     const response = await fetch(`${this.baseUrl}/csv/analyze`, {
       method: "POST",
+      // No Content-Type: the browser sets the multipart boundary itself.
+      headers: { ...apiKeyHeader() }, // BYOK: the endpoint 401s without it
       body: form,
     });
     if (!response.ok) {
@@ -851,7 +853,10 @@ class ApiClient {
   streamAgenticOrchestrator(task: string, signal?: AbortSignal): Promise<Response> {
     return fetch(`${this.baseUrl}/orchestrators/agentic/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...apiKeyHeader(), // BYOK: without this the endpoint 401s every time
+      },
       body: JSON.stringify({ task }),
       signal,
     });
