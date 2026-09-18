@@ -146,6 +146,7 @@ from code_generation import (
     execute_code,
     validate_syntax
 )
+from starlette.concurrency import run_in_threadpool
 from ai_research_platform import AIResearchPlatform
 from main import (
     search_arxiv,
@@ -539,7 +540,7 @@ async def shutdown_event():
 # ============================================================================
 
 @app.get("/")
-async def root():
+def root():
     """Root endpoint."""
     return {
         "message": "Mega Agentic System API",
@@ -572,7 +573,7 @@ GIT_COMMIT = _resolve_commit()
 
 
 @app.get("/health")
-async def health_check():
+def health_check():
     """Health check endpoint."""
     return {
         "status": "healthy",
@@ -582,7 +583,7 @@ async def health_check():
 
 
 @app.post("/tasks", response_model=TaskResponse, status_code=202)
-async def create_task(task_data: TaskCreate, background_tasks: BackgroundTasks,
+def create_task(task_data: TaskCreate, background_tasks: BackgroundTasks,
                       gemini_key: str = Depends(get_gemini_key)):
     """
     Create and execute a new task.
@@ -769,7 +770,7 @@ async def execute_task_background(task_id: str, task: Task, gemini_key: str):
 
 
 @app.get("/tasks/{task_id}/logs")
-async def get_task_logs(task_id: str):
+def get_task_logs(task_id: str):
     """Get structured execution logs and agent cards for a task."""
     if task_id not in task_store:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -783,7 +784,7 @@ async def get_task_logs(task_id: str):
 
 
 @app.get("/tasks/{task_id}", response_model=TaskResponse)
-async def get_task(task_id: str):
+def get_task(task_id: str):
     """Get task status and results."""
     if task_id not in task_store:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -812,7 +813,7 @@ async def get_task(task_id: str):
 
 
 @app.get("/tasks", response_model=List[TaskResponse])
-async def list_tasks(limit: int = 50, offset: int = 0):
+def list_tasks(limit: int = 50, offset: int = 0):
     """List all tasks."""
     tasks = list(task_store.values())[offset:offset+limit]
     return [
@@ -840,7 +841,7 @@ async def list_tasks(limit: int = 50, offset: int = 0):
 
 
 @app.get("/metrics", response_model=SystemMetrics)
-async def get_metrics():
+def get_metrics():
     """Get system performance metrics."""
     if not mega_system:
         raise HTTPException(status_code=503, detail="System not initialized")
@@ -899,20 +900,20 @@ async def get_metrics():
 
 
 @app.get("/usage")
-async def get_usage():
+def get_usage():
     """Cumulative Gemini token usage since server start, broken down by model and label."""
     return usage_tracker.snapshot()
 
 
 @app.post("/usage/reset")
-async def reset_usage():
+def reset_usage():
     """Reset the in-memory token usage counters."""
     usage_tracker.reset()
     return {"message": "Token usage counters reset", "token_usage": usage_tracker.snapshot()}
 
 
 @app.post("/system/optimize")
-async def optimize_system():
+def optimize_system():
     """Trigger system optimization."""
     if not mega_system:
         raise HTTPException(status_code=503, detail="System not initialized")
@@ -922,7 +923,7 @@ async def optimize_system():
 
 
 @app.post("/system/save")
-async def save_system_state():
+def save_system_state():
     """Save system state."""
     if not mega_system:
         raise HTTPException(status_code=503, detail="System not initialized")
@@ -932,7 +933,7 @@ async def save_system_state():
 
 
 @app.get("/modes")
-async def get_modes():
+def get_modes():
     """Get available agent modes with descriptions."""
     modes = []
     for mode in AgentMode:
@@ -945,7 +946,7 @@ async def get_modes():
 
 
 @app.get("/complexities")
-async def get_complexities():
+def get_complexities():
     """Get available complexity levels."""
     return {
         "complexities": [
@@ -962,7 +963,7 @@ async def get_complexities():
 # ============================================================================
 
 @app.post("/images/generate")
-async def generate_image_endpoint(request: ImageGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def generate_image_endpoint(request: ImageGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate images using Imagen models."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1003,7 +1004,7 @@ async def generate_image_endpoint(request: ImageGenerateRequest, ai_client: gena
 
 
 @app.post("/images/edit")
-async def edit_image_endpoint(request: ImageEditRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def edit_image_endpoint(request: ImageEditRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Edit an image using Gemini's image editing capabilities."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1046,7 +1047,7 @@ async def edit_image_endpoint(request: ImageEditRequest, ai_client: genai.Client
 
 
 @app.post("/images/generate-with-reference")
-async def generate_with_reference_endpoint(request: ImageReferenceGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def generate_with_reference_endpoint(request: ImageReferenceGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate images using a reference image for style guidance."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1090,7 +1091,7 @@ async def generate_with_reference_endpoint(request: ImageReferenceGenerateReques
 
 
 @app.post("/images/batch-generate")
-async def batch_generate_endpoint(request: ImageBatchGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def batch_generate_endpoint(request: ImageBatchGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate images for multiple prompts in batch."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1140,7 +1141,7 @@ async def batch_generate_endpoint(request: ImageBatchGenerateRequest, ai_client:
 # ============================================================================
 
 @app.post("/documents/generate")
-async def generate_document_endpoint(request: DocumentGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def generate_document_endpoint(request: DocumentGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate document content."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1184,7 +1185,7 @@ async def generate_document_endpoint(request: DocumentGenerateRequest, ai_client
 
 
 @app.post("/documents/analyze")
-async def analyze_document_endpoint(content: str, ai_client: genai.Client = Depends(get_gemini_client)):
+def analyze_document_endpoint(content: str, ai_client: genai.Client = Depends(get_gemini_client)):
     """Analyze document content."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1208,7 +1209,7 @@ async def analyze_document_endpoint(content: str, ai_client: genai.Client = Depe
 
 
 @app.post("/documents/summarize")
-async def summarize_document_endpoint(request: DocumentSummarizeRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def summarize_document_endpoint(request: DocumentSummarizeRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Summarize document content."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1225,7 +1226,7 @@ async def summarize_document_endpoint(request: DocumentSummarizeRequest, ai_clie
 
 
 @app.post("/documents/expand")
-async def expand_document_endpoint(request: DocumentExpandRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def expand_document_endpoint(request: DocumentExpandRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Expand document with more detail."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1243,7 +1244,7 @@ async def expand_document_endpoint(request: DocumentExpandRequest, ai_client: ge
 
 
 @app.post("/documents/translate")
-async def translate_document_endpoint(request: DocumentTranslateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def translate_document_endpoint(request: DocumentTranslateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Translate document to another language."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1265,7 +1266,7 @@ async def translate_document_endpoint(request: DocumentTranslateRequest, ai_clie
 
 
 @app.post("/documents/improve")
-async def improve_document_endpoint(request: DocumentImproveRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def improve_document_endpoint(request: DocumentImproveRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Improve document based on specified criteria."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1282,7 +1283,7 @@ async def improve_document_endpoint(request: DocumentImproveRequest, ai_client: 
 
 
 @app.post("/documents/research")
-async def research_document_endpoint(request: DocumentResearchRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def research_document_endpoint(request: DocumentResearchRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate document with web research."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1326,7 +1327,11 @@ async def transcribe_audio_endpoint(
         tmp_path = tmp.name
 
     try:
-        result = transcribe_audio(
+        # These three endpoints must stay async (they await file.read()), so the
+        # blocking model call is pushed to a worker thread explicitly. Left on
+        # the event loop it froze every other request for the call's duration.
+        result = await run_in_threadpool(
+            transcribe_audio,
             client=ai_client,
             audio_path=tmp_path,
             mime_type=file.content_type,
@@ -1336,7 +1341,8 @@ async def transcribe_audio_endpoint(
             diarize=diarize,
             word_timestamps=word_timestamps,
         )
-        markdown_doc = transcript_to_markdown(
+        markdown_doc = await run_in_threadpool(
+            transcript_to_markdown,
             result,
             title=title or _os.path.splitext(file.filename or "Transcript")[0] or "Transcript",
         )
@@ -1372,7 +1378,7 @@ async def transcribe_audio_endpoint(
 # ============================================================================
 
 @app.post("/code/generate")
-async def generate_code_endpoint(request: CodeGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def generate_code_endpoint(request: CodeGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate code based on requirements."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1416,7 +1422,7 @@ async def generate_code_endpoint(request: CodeGenerateRequest, ai_client: genai.
 
 
 @app.post("/code/review")
-async def review_code_endpoint(request: CodeReviewRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def review_code_endpoint(request: CodeReviewRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Review code for issues and improvements."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1440,7 +1446,7 @@ async def review_code_endpoint(request: CodeReviewRequest, ai_client: genai.Clie
 
 
 @app.post("/code/explain")
-async def explain_code_endpoint(request: CodeExplainRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def explain_code_endpoint(request: CodeExplainRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Explain what code does."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1457,7 +1463,7 @@ async def explain_code_endpoint(request: CodeExplainRequest, ai_client: genai.Cl
 
 
 @app.post("/code/refactor")
-async def refactor_code_endpoint(request: CodeRefactorRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def refactor_code_endpoint(request: CodeRefactorRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Refactor code according to specified goals."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1474,7 +1480,7 @@ async def refactor_code_endpoint(request: CodeRefactorRequest, ai_client: genai.
 
 
 @app.post("/code/convert")
-async def convert_code_endpoint(request: CodeConvertRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def convert_code_endpoint(request: CodeConvertRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Convert code from one language to another."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1497,7 +1503,7 @@ async def convert_code_endpoint(request: CodeConvertRequest, ai_client: genai.Cl
 
 
 @app.post("/code/tests")
-async def generate_tests_endpoint(request: CodeTestsRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def generate_tests_endpoint(request: CodeTestsRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate unit tests for code."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
@@ -1525,7 +1531,7 @@ async def generate_tests_endpoint(request: CodeTestsRequest, ai_client: genai.Cl
 
 
 @app.post("/code/execute")
-async def execute_code_endpoint(request: CodeExecuteRequest):
+def execute_code_endpoint(request: CodeExecuteRequest):
     """Execute Python code and return results."""
     try:
         result = execute_code(
@@ -1548,7 +1554,7 @@ async def execute_code_endpoint(request: CodeExecuteRequest):
 
 
 @app.post("/code/validate")
-async def validate_code_endpoint(request: CodeValidateRequest):
+def validate_code_endpoint(request: CodeValidateRequest):
     """Validate code syntax without executing."""
     try:
         result = validate_syntax(
@@ -1569,7 +1575,7 @@ async def validate_code_endpoint(request: CodeValidateRequest):
 # ============================================================================
 
 @app.post("/research/query")
-async def research_query_endpoint(request: ResearchRequest, gemini_key: str = Depends(get_gemini_key)):
+def research_query_endpoint(request: ResearchRequest, gemini_key: str = Depends(get_gemini_key)):
     """Process research platform queries (BYOK: uses the caller's cached platform)."""
     research_platform = _get_platform(gemini_key)
 
@@ -1620,7 +1626,7 @@ class GroundedQueryRequest(BaseModel):
 
 
 @app.post("/research/arxiv")
-async def search_arxiv_endpoint(request: SearchRequest):
+def search_arxiv_endpoint(request: SearchRequest):
     """Search arXiv for academic papers."""
     try:
         raw = search_arxiv(request.query, request.max_results)
@@ -1630,7 +1636,7 @@ async def search_arxiv_endpoint(request: SearchRequest):
 
 
 @app.post("/research/pubmed")
-async def search_pubmed_endpoint(request: SearchRequest):
+def search_pubmed_endpoint(request: SearchRequest):
     """Search PubMed for medical papers with full article details."""
     try:
         raw = search_pubmed(request.query, request.max_results)
@@ -1641,7 +1647,7 @@ async def search_pubmed_endpoint(request: SearchRequest):
 
 
 @app.post("/research/wikipedia")
-async def search_wikipedia_endpoint(request: WikipediaRequest):
+def search_wikipedia_endpoint(request: WikipediaRequest):
     """Fetch a Wikipedia article summary + content."""
     try:
         raw = search_wikipedia(request.query)
@@ -1651,7 +1657,7 @@ async def search_wikipedia_endpoint(request: WikipediaRequest):
 
 
 @app.post("/research/grounded")
-async def grounded_query_endpoint(request: GroundedQueryRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def grounded_query_endpoint(request: GroundedQueryRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Answer a query using Gemini with Google Search grounding."""
     try:
         result = research_with_grounding(request.query, client=ai_client)
@@ -1668,7 +1674,7 @@ class MapsQueryRequest(BaseModel):
 
 
 @app.post("/research/maps")
-async def maps_query_endpoint(request: MapsQueryRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def maps_query_endpoint(request: MapsQueryRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Answer a location query using Gemini with Google Maps grounding.
 
     Coordinates are optional; supply both or neither. They mainly affect
@@ -1745,7 +1751,7 @@ def _require_rag(gemini_key: str):
 
 
 @app.post("/rag/documents")
-async def rag_add_documents(request: RagAddDocumentsRequest, gemini_key: str = Depends(get_gemini_key)):
+def rag_add_documents(request: RagAddDocumentsRequest, gemini_key: str = Depends(get_gemini_key)):
     """Chunk, embed, and add documents to the RAG knowledge base."""
     rag = _require_rag(gemini_key)
     try:
@@ -1757,14 +1763,14 @@ async def rag_add_documents(request: RagAddDocumentsRequest, gemini_key: str = D
 
 
 @app.get("/rag/documents")
-async def rag_stats(gemini_key: str = Depends(get_gemini_key)):
+def rag_stats(gemini_key: str = Depends(get_gemini_key)):
     """Return current RAG KB stats."""
     rag = _require_rag(gemini_key)
     return rag.stats()
 
 
 @app.delete("/rag/documents")
-async def rag_clear(gemini_key: str = Depends(get_gemini_key)):
+def rag_clear(gemini_key: str = Depends(get_gemini_key)):
     """Clear the in-memory RAG KB."""
     rag = _require_rag(gemini_key)
     rag.documents = []
@@ -1791,7 +1797,7 @@ async def rag_upload_pdf(
 
 
 @app.post("/rag/retrieve")
-async def rag_retrieve(request: RagRetrievalRequest, gemini_key: str = Depends(get_gemini_key)):
+def rag_retrieve(request: RagRetrievalRequest, gemini_key: str = Depends(get_gemini_key)):
     """Retrieve the top-k matching chunks with similarity scores."""
     rag = _require_rag(gemini_key)
     try:
@@ -1802,7 +1808,7 @@ async def rag_retrieve(request: RagRetrievalRequest, gemini_key: str = Depends(g
 
 
 @app.post("/rag/answer")
-async def rag_answer(request: RagAnswerRequest, gemini_key: str = Depends(get_gemini_key)):
+def rag_answer(request: RagAnswerRequest, gemini_key: str = Depends(get_gemini_key)):
     """Answer a question with RAG-augmented generation, returning sources."""
     rag = _require_rag(gemini_key)
     try:
@@ -1829,7 +1835,7 @@ class MusicGenerateRequest(BaseModel):
 
 
 @app.post("/music/generate")
-async def music_generate_endpoint(request: MusicGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def music_generate_endpoint(request: MusicGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate music with Lyria 3. Returns base64-encoded audio and lyrics."""
     try:
         images = (
@@ -1864,7 +1870,7 @@ async def music_generate_endpoint(request: MusicGenerateRequest, ai_client: gena
 # ============================================================================
 
 @app.get("/music/realtime/metadata")
-async def music_realtime_metadata_endpoint():
+def music_realtime_metadata_endpoint():
     """Static metadata for the Lyria RealTime UI (scales, modes, config ranges)."""
     return {"success": True, **realtime_metadata()}
 
@@ -2014,7 +2020,7 @@ class MultiSpeakerSpeechRequest(BaseModel):
 
 
 @app.get("/speech/voices")
-async def speech_voices_endpoint():
+def speech_voices_endpoint():
     """List available prebuilt voices and TTS models."""
     return {
         "success": True,
@@ -2024,7 +2030,7 @@ async def speech_voices_endpoint():
 
 
 @app.post("/speech/generate")
-async def speech_generate_endpoint(request: SpeechGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def speech_generate_endpoint(request: SpeechGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate single-speaker speech. Returns base64-encoded WAV audio."""
     try:
         result = generate_speech(
@@ -2043,7 +2049,7 @@ async def speech_generate_endpoint(request: SpeechGenerateRequest, ai_client: ge
 
 
 @app.post("/speech/generate-multi")
-async def speech_generate_multi_endpoint(request: MultiSpeakerSpeechRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def speech_generate_multi_endpoint(request: MultiSpeakerSpeechRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Generate multi-speaker (conversational) speech. Returns base64-encoded WAV audio."""
     try:
         result = generate_multi_speaker_speech(
@@ -2070,7 +2076,7 @@ DEFAULT_LIVE_VOICE = "Puck"
 
 
 @app.get("/speech/live/metadata")
-async def speech_live_metadata_endpoint():
+def speech_live_metadata_endpoint():
     """Static metadata for the Gemini Live UI (model + selectable voices)."""
     return {
         "success": True,
@@ -2232,7 +2238,7 @@ async def csv_analyze_endpoint(file: UploadFile = File(...), ai_client: genai.Cl
             tmp.write(contents)
             tmp_path = tmp.name
         try:
-            raw = analyze_missing_data(tmp_path, ai_client)
+            raw = await run_in_threadpool(analyze_missing_data, tmp_path, ai_client)
             return {"success": True, "analysis": json.loads(raw)}
         finally:
             try:
@@ -2246,7 +2252,7 @@ async def csv_analyze_endpoint(file: UploadFile = File(...), ai_client: genai.Cl
 
 
 @app.post("/csv/analyze-text")
-async def csv_analyze_text_endpoint(request: CsvAnalyzeRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+def csv_analyze_text_endpoint(request: CsvAnalyzeRequest, ai_client: genai.Client = Depends(get_gemini_client)):
     """Analyze CSV content sent as a raw string (alternative to file upload)."""
     try:
         with tempfile.NamedTemporaryFile(
@@ -2302,7 +2308,7 @@ def _require_assistant(gemini_key: str):
 
 
 @app.post("/orchestrators/agentic")
-async def orchestrator_execute(request: OrchestratorTaskRequest, gemini_key: str = Depends(get_gemini_key)):
+def orchestrator_execute(request: OrchestratorTaskRequest, gemini_key: str = Depends(get_gemini_key)):
     """Run a one-shot task through the AgenticOrchestrator (tool-using Gemini agent)."""
     orch = _require_orchestrator(gemini_key)
     try:
@@ -2313,7 +2319,7 @@ async def orchestrator_execute(request: OrchestratorTaskRequest, gemini_key: str
 
 
 @app.post("/orchestrators/agentic/stream")
-async def orchestrator_execute_stream(request: OrchestratorTaskRequest, gemini_key: str = Depends(get_gemini_key)):
+def orchestrator_execute_stream(request: OrchestratorTaskRequest, gemini_key: str = Depends(get_gemini_key)):
     """Stream a research response as the orchestrator generates it."""
     orch = _require_orchestrator(gemini_key)
 
@@ -2329,7 +2335,7 @@ async def orchestrator_execute_stream(request: OrchestratorTaskRequest, gemini_k
 
 
 @app.post("/orchestrators/assistant/chat")
-async def assistant_chat(request: AssistantChatRequest, gemini_key: str = Depends(get_gemini_key)):
+def assistant_chat(request: AssistantChatRequest, gemini_key: str = Depends(get_gemini_key)):
     """Send a message to the persistent ResearchAssistant chat session."""
     assistant = _require_assistant(gemini_key)
     try:
@@ -2340,7 +2346,7 @@ async def assistant_chat(request: AssistantChatRequest, gemini_key: str = Depend
 
 
 @app.get("/orchestrators/assistant/history")
-async def assistant_history(gemini_key: str = Depends(get_gemini_key)):
+def assistant_history(gemini_key: str = Depends(get_gemini_key)):
     """Return the conversation history of the persistent assistant."""
     assistant = _require_assistant(gemini_key)
     try:
@@ -2350,7 +2356,7 @@ async def assistant_history(gemini_key: str = Depends(get_gemini_key)):
 
 
 @app.post("/orchestrators/assistant/reset")
-async def assistant_reset(gemini_key: str = Depends(get_gemini_key)):
+def assistant_reset(gemini_key: str = Depends(get_gemini_key)):
     """Start a fresh ResearchAssistant chat session (for this API key)."""
     try:
         from research_assistant import ResearchAssistant
@@ -2362,7 +2368,7 @@ async def assistant_reset(gemini_key: str = Depends(get_gemini_key)):
 
 
 @app.post("/orchestrators/scout-plan-build")
-async def scout_plan_build_endpoint(request: ScoutPlanBuildRequest):
+def scout_plan_build_endpoint(request: ScoutPlanBuildRequest):
     """Run the full Scout → Plan → Build coding workflow."""
     if not scout_plan_build:
         raise HTTPException(
