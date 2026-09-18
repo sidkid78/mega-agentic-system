@@ -47,6 +47,13 @@ ORCHESTRATOR_MODEL = "gemini-3.1-pro-preview"  # Deep thinker / planner
 LEAD_MODEL         = "gemini-3.7-flash"         # Fast planner / delegator
 WORKER_MODEL       = "gemini-3.7-flash"         # Fast executor
 
+# ─── Thinking levels ─────────────────────────────────────────────────────────
+# Planners ran at HIGH, which put a full orch5 run at 3-6 minutes - too slow
+# to demo live. LOW keeps the hierarchy intact and cuts the planning legs;
+# raise PLANNER_THINKING back to HIGH for genuinely hard decomposition.
+PLANNER_THINKING = types.ThinkingLevel.LOW   # orchestrator + team leads
+WORKER_THINKING  = types.ThinkingLevel.LOW   # workers
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  TASK REGISTRY  ("Till-Done" system)
@@ -427,9 +434,9 @@ class Agent:
                     system_instruction=system,
                     tools=self._get_tools(),
                     thinking_config=types.ThinkingConfig(
-                        thinking_level=types.ThinkingLevel.LOW  # speed for workers
+                        thinking_level=WORKER_THINKING
                         if self.cfg.role == "worker"
-                        else types.ThinkingLevel.HIGH            # quality for planners
+                        else PLANNER_THINKING
                     ),
                 ),
             )
