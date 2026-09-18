@@ -147,6 +147,7 @@ from code_generation import (
     validate_syntax
 )
 from starlette.concurrency import run_in_threadpool
+from assistant_stream import StreamingResearchAssistant
 from ai_research_platform import AIResearchPlatform
 from main import (
     search_arxiv,
@@ -2332,6 +2333,70 @@ def orchestrator_execute_stream(request: OrchestratorTaskRequest, gemini_key: st
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# Streaming assistants are cached per key, like the research platforms: the
+# conversation lives in previous_interaction_id on the instance.
+_stream_assistant_cache: Dict[str, StreamingResearchAssistant] = {}
+
+
+def _require_stream_assistant(gemini_key: str) -> StreamingResearchAssistant:
+    assistant = _stream_assistant_cache.get(gemini_key)
+    if assistant is None:
+        assistant = StreamingResearchAssistant(genai.Client(api_key=gemini_key))
+        _stream_assistant_cache[gemini_key] = assistant
+    return assistant
+
+
+@app.post("/orchestrators/assistant/chat/stream")
+def assistant_chat_stream(
+    request: AssistantChatRequest,
+    gemini_key: str = Depends(get_gemini_key),
+):
+    """Stream the assistant's reply as server-sent events.
+
+    Exists because the non-streaming endpoint cannot finish in time: a
+    research answer that takes longer than roughly 64 seconds is cut off by
+    the proxy as a 502. Streaming keeps bytes moving, so the same answer
+    arrives, and the tool calls become visible while they happen instead of
+    after.
+
+    Event data is JSON, one object per line:
+      {"type":"tool_call","name","arguments"}
+      {"type":"tool_result","name","chars"}
+      {"type":"text","delta"}
+      {"type":"done","text"}
+      {"type":"error","message"}
+    """
+    assistant = _require_stream_assistant(gemini_key)
+
+    def event_stream():
+        try:
+            for event in assistant.stream_message(request.message):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.error(f"Assistant stream failed: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Render and other proxies buffer by default, which would hold the
+            # whole response back and reintroduce the timeout this fixes.
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/orchestrators/assistant/stream/reset")
+def assistant_stream_reset(gemini_key: str = Depends(get_gemini_key)):
+    """Forget the streaming assistant's conversation for this key."""
+    _require_stream_assistant(gemini_key).reset()
+    return {"success": True, "message": "Streaming assistant conversation reset"}
 
 
 @app.post("/orchestrators/assistant/chat")

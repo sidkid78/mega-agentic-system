@@ -132,6 +132,16 @@ export interface TaskLogs {
   events: AgentEvent[];
 }
 
+/** Events from POST /orchestrators/assistant/chat/stream.
+ *  Tool activity is surfaced so the UI can show what the assistant is doing
+ *  while it does it, rather than only the final answer. */
+export type AssistantStreamEvent =
+  | { type: "tool_call"; name: string; arguments: string }
+  | { type: "tool_result"; name: string; chars: number }
+  | { type: "text"; delta: string }
+  | { type: "done"; text: string }
+  | { type: "error"; message: string };
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -845,6 +855,62 @@ class ApiClient {
       body: JSON.stringify({ task }),
       signal,
     });
+  }
+
+  /** One event from the streaming assistant. */
+  async *streamAssistantChat(
+    message: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<AssistantStreamEvent> {
+    const response = await fetch(`${this.baseUrl}/orchestrators/assistant/chat/stream`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...apiKeyHeader(), // BYOK
+      },
+      body: JSON.stringify({ message }),
+      signal,
+    });
+
+    if (!response.ok || !response.body) {
+      const detail = await response.text().catch(() => response.statusText);
+      throw new ApiError(detail || `HTTP error! status: ${response.status}`, response.status);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE frames are separated by a blank line. Keep the trailing
+        // partial frame in the buffer until the rest of it arrives.
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+
+        for (const frame of frames) {
+          const line = frame.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          const payload = line.slice(6);
+          if (payload === "[DONE]") return;
+          try {
+            yield JSON.parse(payload) as AssistantStreamEvent;
+          } catch {
+            // A malformed frame should not kill the stream.
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  async resetAssistantStream(): Promise<{ success: boolean }> {
+    return this.request("/orchestrators/assistant/stream/reset", { method: "POST" });
   }
 
   async assistantChat(message: string): Promise<{ success: boolean; response: string }> {
