@@ -2659,7 +2659,7 @@ async def run_multi_team_task(task_id: str, goal: str, gemini_key: str):
 
 
 @app.post("/orchestrators/multi-team", status_code=202)
-async def multi_team_endpoint(
+def multi_team_endpoint(
     request: MultiTeamRequest,
     background_tasks: BackgroundTasks,
     gemini_key: str = Depends(get_gemini_key),
