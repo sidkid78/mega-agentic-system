@@ -6,11 +6,11 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiClient } from "@/lib/api"
-import { Loader2, Search, Microscope, BookOpen, Globe, ExternalLink, Users, Calendar, FlaskConical, Tag, Link } from "lucide-react"
+import { Loader2, Search, Microscope, BookOpen, Globe, ExternalLink, Users, Calendar, FlaskConical, Tag, Link, MapPin, Crosshair } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { MarkdownRenderer } from "@/components/markdown-renderer"
 
-type Tab = "arxiv" | "pubmed" | "wikipedia" | "grounded"
+type Tab = "arxiv" | "pubmed" | "wikipedia" | "grounded" | "maps"
 
 export default function SearchPage() {
   const [tab, setTab] = useState<Tab>("arxiv")
@@ -34,6 +34,16 @@ export default function SearchPage() {
     search_queries: string[];
     sources: Array<{ title: string; url: string }>;
   } | null>(null)
+  const [maps, setMaps] = useState<{
+    answer: string;
+    places: Array<{ name: string; place_id: string | null; url: string }>;
+    used_location: boolean;
+  } | null>(null)
+  // Optional coordinates for Maps grounding. Kept as strings so the inputs can
+  // be cleared; parsed only at submit.
+  const [lat, setLat] = useState("")
+  const [lng, setLng] = useState("")
+  const [locating, setLocating] = useState(false)
 
   const reset = () => {
     setError(null)
@@ -41,6 +51,27 @@ export default function SearchPage() {
     setPubmed(null)
     setWiki(null)
     setGrounded(null)
+    setMaps(null)
+  }
+
+  const useMyLocation = () => {
+    if (!navigator.geolocation) {
+      setError("This browser does not expose geolocation.")
+      return
+    }
+    setLocating(true)
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLat(pos.coords.latitude.toFixed(6))
+        setLng(pos.coords.longitude.toFixed(6))
+        setLocating(false)
+      },
+      (err) => {
+        setError(`Could not get your location: ${err.message}`)
+        setLocating(false)
+      },
+      { timeout: 10000 },
+    )
   }
 
   const handleSubmit = async () => {
@@ -59,6 +90,22 @@ export default function SearchPage() {
       } else if (tab === "wikipedia") {
         const r = await apiClient.searchWikipedia(query)
         setWiki(r.article)
+      } else if (tab === "maps") {
+        // Send coordinates only when both parse; the API rejects one without
+        // the other, and a named-place query works fine with neither.
+        const latNum = parseFloat(lat)
+        const lngNum = parseFloat(lng)
+        const hasCoords = Number.isFinite(latNum) && Number.isFinite(lngNum)
+        const r = await apiClient.mapsQuery(
+          query,
+          hasCoords ? latNum : undefined,
+          hasCoords ? lngNum : undefined,
+        )
+        setMaps({
+          answer: r.result.answer ?? "",
+          places: r.result.places ?? [],
+          used_location: r.result.used_location ?? false,
+        })
       } else {
         const r = await apiClient.groundedQuery(query)
         setGrounded({
@@ -84,7 +131,7 @@ export default function SearchPage() {
               Search Tools
             </h1>
             <p className="text-lg text-zinc-700 dark:text-zinc-300">
-              arXiv, PubMed, Wikipedia, and Gemini Google-Search grounding
+              arXiv, PubMed, Wikipedia, and Gemini grounding on Google Search and Maps
             </p>
           </div>
           <ThemeToggle />
@@ -96,6 +143,7 @@ export default function SearchPage() {
             <TabsTrigger value="pubmed"><BookOpen className="mr-2 h-4 w-4" />PubMed</TabsTrigger>
             <TabsTrigger value="wikipedia"><Globe className="mr-2 h-4 w-4" />Wikipedia</TabsTrigger>
             <TabsTrigger value="grounded"><Search className="mr-2 h-4 w-4" />Grounded</TabsTrigger>
+            <TabsTrigger value="maps"><MapPin className="mr-2 h-4 w-4" />Maps</TabsTrigger>
           </TabsList>
 
           <Card>
@@ -106,6 +154,7 @@ export default function SearchPage() {
                 {tab === "pubmed" && "Search PubMed (returns matching IDs)."}
                 {tab === "wikipedia" && "Fetch a Wikipedia article (no max_results)."}
                 {tab === "grounded" && "Ask Gemini with live Google-Search grounding."}
+                {tab === "maps" && "Ask Gemini with live Google-Maps grounding. Coordinates are optional — they mainly help \"near me\" queries."}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -116,7 +165,7 @@ export default function SearchPage() {
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
                 />
-                {tab !== "wikipedia" && tab !== "grounded" && (
+                {tab !== "wikipedia" && tab !== "grounded" && tab !== "maps" && (
                   <Input
                     type="number"
                     min={1}
@@ -126,6 +175,29 @@ export default function SearchPage() {
                   />
                 )}
               </div>
+              {tab === "maps" && (
+                <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-3">
+                  <Input
+                    placeholder="Latitude (optional)"
+                    inputMode="decimal"
+                    value={lat}
+                    onChange={(e) => setLat(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+                  />
+                  <Input
+                    placeholder="Longitude (optional)"
+                    inputMode="decimal"
+                    value={lng}
+                    onChange={(e) => setLng(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+                  />
+                  <Button type="button" variant="outline" onClick={useMyLocation} disabled={locating}>
+                    {locating
+                      ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Locating…</>
+                      : <><Crosshair className="mr-2 h-4 w-4" />Use my location</>}
+                  </Button>
+                </div>
+              )}
               <Button onClick={handleSubmit} disabled={loading || !query.trim()} className="w-full pulse-glow">
                 {loading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Searching…</> : <><Search className="mr-2 h-4 w-4" />Search</>}
               </Button>
@@ -347,6 +419,73 @@ export default function SearchPage() {
                       </ul>
                     </CardContent>
                   </Card>
+                )}
+              </>
+            )}
+          </TabsContent>
+
+          <TabsContent value="maps" className="space-y-3">
+            {maps && (
+              <>
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center justify-between gap-3">
+                      <CardTitle>Answer</CardTitle>
+                      <span className="text-xs text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5">
+                        <MapPin className="h-3.5 w-3.5" />
+                        {maps.used_location ? "grounded near your coordinates" : "no coordinates supplied"}
+                      </span>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="prose prose-sm dark:prose-invert max-w-none">
+                      <MarkdownRenderer>{maps.answer}</MarkdownRenderer>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {maps.places.length > 0 && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-sm">
+                        Places ({maps.places.length})
+                      </CardTitle>
+                      <CardDescription>
+                        Cited by Gemini from Google Maps
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {maps.places.map((pl) => (
+                          <a
+                            key={pl.place_id ?? pl.url}
+                            href={pl.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="group flex items-start gap-2.5 rounded-xl border border-zinc-200/50 dark:border-zinc-800/50 px-3 py-2.5 hover:border-emerald-500/40 hover:bg-emerald-500/[0.03] transition-colors"
+                          >
+                            <MapPin className="h-4 w-4 mt-0.5 shrink-0 text-emerald-500" />
+                            <span className="min-w-0 flex-1">
+                              <span className="block text-sm font-medium leading-snug text-zinc-900 dark:text-zinc-100 group-hover:text-emerald-600 dark:group-hover:text-emerald-400">
+                                {pl.name || "Unnamed place"}
+                              </span>
+                              <span className="block text-[11px] text-zinc-400 truncate">
+                                Open in Google Maps
+                              </span>
+                            </span>
+                            <ExternalLink className="h-3.5 w-3.5 mt-0.5 shrink-0 text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </a>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {maps.places.length === 0 && maps.answer && (
+                  <p className="text-sm text-zinc-500">
+                    Gemini answered without citing any Maps places — try a more
+                    location-specific query.
+                  </p>
                 )}
               </>
             )}

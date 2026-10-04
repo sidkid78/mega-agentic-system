@@ -82,7 +82,7 @@ requires-dist = [
     { name = "arxiv", specifier = ">=2.2.0" },
     { name = "bio", specifier = ">=1.8.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
-    { name = "google-genai", specifier = ">=1.39.0" },
+    { name = "google-genai", specifier = ">=2.0.0" },
     { name = "markdown", specifier = ">=3.9" },
     { name = "pillow", specifier = ">=11.3.0" },
     { name = "pytest", specifier = ">=8.4.2" },

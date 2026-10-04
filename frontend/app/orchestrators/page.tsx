@@ -34,6 +34,11 @@ export default function OrchestratorsPage() {
   const [assistantInput, setAssistantInput] = useState("")
   const [assistantLoading, setAssistantLoading] = useState(false)
   const [assistantHistory, setAssistantHistory] = useState<Array<{ role: string; content: string }>>([])
+  // The reply currently being streamed, kept out of history until it lands.
+  const [streamingReply, setStreamingReply] = useState("")
+  // What the assistant is doing right now, e.g. "search_arxiv". Cleared when
+  // text starts arriving, since by then the tools are done.
+  const [toolActivity, setToolActivity] = useState<string[]>([])
 
   const [error, setError] = useState<string | null>(null)
 
@@ -110,17 +115,43 @@ export default function OrchestratorsPage() {
     setAssistantInput("")
     setAssistantHistory((p) => [...p, { role: "user", content: msg }])
     setAssistantLoading(true); setError(null)
+    setStreamingReply(""); setToolActivity([])
+
+    // Streamed rather than a single POST: a research answer can take minutes,
+    // and the proxy cuts a silent request at ~64s. Streaming also shows the
+    // tool calls while they run instead of only the finished answer.
+    let text = ""
     try {
-      const r = await apiClient.assistantChat(msg)
-      setAssistantHistory((p) => [...p, { role: "model", content: r.response }])
+      for await (const ev of apiClient.streamAssistantChat(msg)) {
+        if (ev.type === "text") {
+          text += ev.delta
+          setStreamingReply(text)
+        } else if (ev.type === "tool_call") {
+          setToolActivity((p) => [...p, ev.name])
+        } else if (ev.type === "done") {
+          text = ev.text || text
+        } else if (ev.type === "error") {
+          setError(ev.message)
+        }
+      }
+      if (text) setAssistantHistory((p) => [...p, { role: "model", content: text }])
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Chat failed")
-    } finally { setAssistantLoading(false) }
+      // Keep whatever streamed before the failure rather than discarding it.
+      if (text) setAssistantHistory((p) => [...p, { role: "model", content: text }])
+    } finally {
+      setAssistantLoading(false)
+      setStreamingReply("")
+      setToolActivity([])
+    }
   }
 
   const resetAssistant = async () => {
     try {
-      await apiClient.assistantReset()
+      // Two conversations exist: the legacy chat session and the streaming
+      // one (which lives in previous_interaction_id server-side). Reset both
+      // or the assistant keeps remembering through a "cleared" screen.
+      await Promise.all([apiClient.assistantReset(), apiClient.resetAssistantStream()])
       setAssistantHistory([])
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Reset failed")
@@ -249,7 +280,7 @@ export default function OrchestratorsPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-3 max-h-[500px] overflow-y-auto p-2 rounded bg-zinc-50 dark:bg-zinc-900">
-                  {assistantHistory.length === 0
+                  {assistantHistory.length === 0 && !assistantLoading
                     ? <p className="text-sm text-zinc-500 text-center py-8">No conversation yet.</p>
                     : assistantHistory.map((m, i) => (
                       <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
@@ -258,6 +289,35 @@ export default function OrchestratorsPage() {
                         </div>
                       </div>
                     ))}
+
+                  {/* The reply as it streams in, plus what the assistant is
+                      doing to produce it. */}
+                  {assistantLoading && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[80%] rounded-lg p-3 text-sm bg-zinc-100 dark:bg-zinc-800 space-y-2">
+                        {toolActivity.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {toolActivity.map((name, i) => (
+                              <span
+                                key={`${name}-${i}`}
+                                className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400"
+                              >
+                                {name}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {streamingReply
+                          ? <MarkdownRenderer>{streamingReply}</MarkdownRenderer>
+                          : (
+                            <span className="flex items-center gap-2 text-zinc-500">
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              {toolActivity.length > 0 ? "researching…" : "thinking…"}
+                            </span>
+                          )}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div className="flex gap-2">
                   <Textarea

@@ -18,10 +18,10 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -42,11 +42,14 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          # Must satisfy frontend/package.json engines (>=24.19.0); Vercel
+          # builds this project on 24.x too. On 22, npm ci warns EBADENGINE
+          # and CI tests a runtime nothing else uses.
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 

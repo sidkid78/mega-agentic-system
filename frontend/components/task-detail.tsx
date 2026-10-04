@@ -51,18 +51,21 @@ function eventColor(type: LogEvent["event_type"]): string {
 // Agent roles are open-ended now: hierarchical mints them per task ("Security
 // Architect", "Cloud Storage Engineer"), so match on keywords and fall back to
 // a stable hash so every distinct role still gets its own colour.
+// Order matters: the first match wins, so the most role-defining keyword has
+// to come first. "Security Architect" is a security role, not a generic
+// architect; "Lead API Designer" is a designer, not a generic planner.
 const ROLE_KEYWORDS: [RegExp, string, string][] = [
-  [/plan|strateg|lead|principal/i,       "from-indigo-500 to-blue-500",   "\u{1F9E0}"],
-  [/architect|design/i,                  "from-sky-500 to-cyan-500",      "\u{1F4D0}"],
   [/secur|red team/i,                    "from-rose-500 to-red-600",      "\u{1F6E1}"],
   [/blue team|defen/i,                   "from-blue-500 to-indigo-600",   "\u{1F6E1}"],
+  [/architect|design/i,                  "from-sky-500 to-cyan-500",      "\u{1F4D0}"],
+  [/plan|strateg|lead|principal/i,       "from-indigo-500 to-blue-500",   "\u{1F9E0}"],
   [/critic|oppos|review/i,               "from-orange-500 to-red-500",    "\u{1F50D}"],
-  [/synth|mediat|integrat/i,             "from-emerald-500 to-teal-500",  "\u{1F517}"],
+  [/synthesi|mediat/i,                   "from-emerald-500 to-teal-500",  "\u{1F517}"],
   [/valid|test|qa/i,                     "from-pink-500 to-rose-500",     "✅"],
   [/research|analy/i,                    "from-amber-500 to-orange-500",  "\u{1F4CA}"],
   [/question|socrat/i,                   "from-yellow-500 to-amber-500",  "❓"],
   [/answer|author|writ/i,                "from-teal-500 to-emerald-500",  "✍"],
-  [/engineer|infra|cloud|storage|data/i, "from-violet-500 to-purple-500", "⚙"],
+  [/engineer|infra|cloud|storage|data|integrat/i, "from-violet-500 to-purple-500", "⚙"],
   [/propos|advocate|negoti/i,            "from-fuchsia-500 to-pink-500",  "\u{1F4AC}"],
   [/execut|worker|async/i,               "from-lime-500 to-green-500",    "⚡"],
 ]
@@ -562,9 +565,17 @@ export function TaskDetail({ taskId }: TaskDetailProps) {
                                 <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400 mb-1">
                                   Response
                                 </p>
-                                <pre className="whitespace-pre-wrap break-words rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-[11px] leading-snug max-h-96 overflow-y-auto">
-                                  {event.response}
-                                </pre>
+                                {event.kind === "decompose" ? (
+                                  // Decomposition responses are raw JSON - markdown
+                                  // would mangle them, so keep monospace.
+                                  <pre className="whitespace-pre-wrap break-words rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-[11px] leading-snug max-h-96 overflow-y-auto">
+                                    {event.response}
+                                  </pre>
+                                ) : (
+                                  <div className="rounded bg-zinc-100 dark:bg-zinc-900 p-3 max-h-96 overflow-y-auto prose prose-sm dark:prose-invert max-w-none prose-p:my-2 prose-headings:my-2 prose-headings:text-sm prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:my-2">
+                                    <MarkdownRenderer>{event.response}</MarkdownRenderer>
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>
