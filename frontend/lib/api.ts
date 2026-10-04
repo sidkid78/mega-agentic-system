@@ -174,6 +174,54 @@ export interface MusicConfigRange {
   step: number;
 }
 
+/** One section of a Lyria 3.5 song.
+ *  Lyria returns structure as `[[A0]]` markers with `[:]`-prefixed sung
+ *  lines; the backend parses that into these. A section with no lines is an
+ *  instrumental passage. */
+export interface SongSection {
+  label: string;
+  index: number;
+  lines: string[];
+}
+
+export interface Lyria35Result {
+  success: boolean;
+  audio_base64: string | null;
+  mime_type: string;
+  bytes: number;
+  lyrics: string;
+  sections: SongSection[];
+  is_instrumental: boolean;
+  raw_structure: string;
+  model_used: string;
+  images_used: number;
+}
+
+/** What this deployment can actually do — measured, not the published guide. */
+export interface Lyria35Metadata {
+  success: boolean;
+  model: string;
+  max_images: number;
+  output_formats: string[];
+  sample_rate: number;
+  channels: number;
+  typical_duration_seconds: [number, number];
+  duration_is_promptable: boolean;
+  watermark: string;
+  single_turn_only: boolean;
+  prompt_guide: {
+    genre: string[];
+    instruments: string[];
+    bpm: string;
+    key: string;
+    mood: string[];
+    section_tags: string[];
+    timestamps: string;
+    instrumental: string;
+    language: string;
+  };
+}
+
 export interface MusicRealtimeMetadata {
   success: boolean;
   model: string;
@@ -760,6 +808,24 @@ class ApiClient {
   }
 
   // ===== Music generation (Lyria 3) =====
+  /** Generate a song with Lyria 3.5 (Interactions API, MP3, ~1-3 minutes). */
+  async generateLyria35(
+    prompt: string,
+    images?: MusicImageInput[],
+  ): Promise<Lyria35Result> {
+    return this.request("/music/lyria35", {
+      method: "POST",
+      body: JSON.stringify({
+        prompt,
+        ...(images && images.length > 0 ? { images } : {}),
+      }),
+    });
+  }
+
+  async getLyria35Metadata(): Promise<Lyria35Metadata> {
+    return this.request("/music/lyria35/metadata");
+  }
+
   async generateMusic(
     prompt: string,
     model: "lyria-3-clip-preview" | "lyria-3-pro-preview" = "lyria-3-clip-preview",
