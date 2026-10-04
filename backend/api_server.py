@@ -148,6 +148,7 @@ from code_generation import (
 )
 from starlette.concurrency import run_in_threadpool
 from assistant_stream import StreamingResearchAssistant
+from lyria import generate_music_35, LYRIA_35_MODEL, MAX_IMAGES as LYRIA_MAX_IMAGES
 from ai_research_platform import AIResearchPlatform
 from main import (
     search_arxiv,
@@ -1833,6 +1834,74 @@ class MusicGenerateRequest(BaseModel):
     model: str = Field(default="lyria-3-clip-preview", description="lyria-3-clip-preview (30s) or lyria-3-pro-preview (full song)")
     output_format: str = Field(default="mp3", description="mp3 (both models) or wav (Pro only)")
     images: Optional[List[MusicImageInput]] = Field(default=None, description="Up to 10 inspiration images (Pro model)")
+
+
+class Lyria35Request(BaseModel):
+    """Generate a song with Lyria 3.5."""
+    prompt: str = Field(..., min_length=1, description="What to compose. Genre, instruments, BPM, key, mood and structure all help.")
+    images: Optional[List[MusicImageInput]] = Field(
+        default=None,
+        description=f"Up to {LYRIA_MAX_IMAGES} inspiration images; the model composes from their mood and colour.",
+    )
+
+
+@app.post("/music/lyria35")
+def lyria35_generate_endpoint(
+    request: Lyria35Request,
+    ai_client: genai.Client = Depends(get_gemini_client),
+):
+    """Generate a full-length song with Lyria 3.5.
+
+    Separate from /music/generate because 3.5 runs through the Interactions
+    API while the Lyria 3 models use generate_content. Returns the parsed
+    song structure alongside the audio.
+    """
+    images = (
+        [{"data": i.data, "mime_type": i.mime_type} for i in request.images]
+        if request.images else None
+    )
+    try:
+        return {"success": True, **generate_music_35(request.prompt, images=images, client=ai_client)}
+    except ValueError as e:
+        # Safety-filter rejections and bad input: the caller can fix these, so
+        # 400 rather than 500.
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Lyria 3.5 generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/music/lyria35/metadata")
+def lyria35_metadata_endpoint():
+    """What this deployment can actually do, for the UI to render.
+
+    Deliberately reports measured behaviour rather than the published guide:
+    the documented lyria-3.5-clip-preview and lyria-3.5-pro-preview ids 404
+    on this API, and response_format did not yield WAV.
+    """
+    return {
+        "success": True,
+        "model": LYRIA_35_MODEL,
+        "max_images": LYRIA_MAX_IMAGES,
+        "output_formats": ["mp3"],
+        "sample_rate": 44100,
+        "channels": 2,
+        "typical_duration_seconds": [60, 180],
+        "duration_is_promptable": True,
+        "watermark": "SynthID",
+        "single_turn_only": True,
+        "prompt_guide": {
+            "genre": ["lo-fi hip hop", "jazz fusion", "cinematic orchestral", "synthwave"],
+            "instruments": ["Fender Rhodes piano", "slide guitar", "TR-808 drum machine", "upright bass"],
+            "bpm": "e.g. 85 BPM, or 'slow tempo around 70 BPM'",
+            "key": "e.g. in G major, D minor",
+            "mood": ["nostalgic", "aggressive", "ethereal", "dreamy"],
+            "section_tags": ["[Intro]", "[Verse]", "[Chorus]", "[Bridge]", "[Outro]"],
+            "timestamps": "[0:00 - 0:10] Intro: soft lo-fi beat with vinyl crackle.",
+            "instrumental": "Add 'Instrumental only, no vocals.'",
+            "language": "Prompt in the language you want the lyrics sung in.",
+        },
+    }
 
 
 @app.post("/music/generate")

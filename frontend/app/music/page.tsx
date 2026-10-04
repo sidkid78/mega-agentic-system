@@ -5,13 +5,15 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { apiClient, type MusicImageInput } from "@/lib/api"
-import { Loader2, Music, Play, Pause, Download, Mic2, Wand2, Radio, ImagePlus, X } from "lucide-react"
+import { apiClient, type MusicImageInput, type SongSection } from "@/lib/api"
+import { Loader2, Music, Play, Pause, Download, Mic2, Wand2, Radio, ImagePlus, X, Sparkles } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { MusicRealtimeStudio } from "@/components/music-realtime-studio"
 
 type Model = "lyria-3-clip-preview" | "lyria-3-pro-preview"
-type Tab = Model | "realtime"
+// Lyria 3.5 is its own tab: it runs through a different endpoint (the
+// Interactions API) and has no format or clip/pro choice to make.
+type Tab = Model | "lyria-3.5" | "realtime"
 type OutputFormat = "mp3" | "wav"
 
 interface InspirationImage extends MusicImageInput {
@@ -27,6 +29,10 @@ interface MusicResult {
   lyrics: string
   modelUsed: string
   prompt: string
+  // Lyria 3.5 only: parsed song structure and whether it came back wordless.
+  sections?: SongSection[]
+  isInstrumental?: boolean
+  bytes?: number
 }
 
 const EXAMPLE_PROMPTS: Record<Model, string[]> = {
@@ -44,6 +50,44 @@ const EXAMPLE_PROMPTS: Record<Model, string[]> = {
   ],
 }
 
+/** Prompt starters for 3.5, one per capability the model actually has:
+ *  structure tags, timestamped sections, image-led composition, instrumental,
+ *  and non-English lyrics. */
+const LYRIA_35_PRESETS: { label: string; prompt: string }[] = [
+  {
+    label: "Structure tags",
+    prompt:
+      "A dreamy indie pop song, 100 BPM, in G major.\n\n" +
+      "[Verse 1]\nWalking through the neon glow,\ncity lights reflect below.\n\n" +
+      "[Chorus]\nWe are the echoes in the night,\nburning brighter than the light.",
+  },
+  {
+    label: "Timestamped",
+    prompt:
+      "[0:00 - 0:10] Intro: soft lo-fi beat with vinyl crackle.\n" +
+      "[0:10 - 0:40] Verse: warm Fender Rhodes and gentle vocals about a rainy morning.\n" +
+      "[0:40 - 1:00] Outro: fade out with the piano alone.",
+  },
+  {
+    label: "Instrumental",
+    prompt:
+      "A bright chiptune melody in C major, retro 8-bit video game style, 140 BPM. " +
+      "Instrumental only, no vocals.",
+  },
+  {
+    label: "Cinematic",
+    prompt:
+      "An epic cinematic orchestral piece about a journey home. Starts with a solo " +
+      "piano intro, builds through sweeping strings, and climaxes with a massive wall of sound.",
+  },
+  {
+    label: "\u00c9motion (FR)",
+    prompt:
+      "Cr\u00e9e une chanson pop romantique en fran\u00e7ais sur un coucher de soleil \u00e0 Paris. " +
+      "Utilise du piano et de la guitare acoustique.",
+  },
+]
+
 export default function MusicPage() {
   const [tab, setTab] = useState<Tab>("lyria-3-clip-preview")
   const [prompt, setPrompt] = useState("")
@@ -56,7 +100,11 @@ export default function MusicPage() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  const model: Model = tab === "realtime" ? "lyria-3-clip-preview" : tab
+  const isLyria35 = tab === "lyria-3.5"
+  const model: Model =
+    tab === "realtime" || tab === "lyria-3.5" ? "lyria-3-clip-preview" : tab
+  // 3.5 takes images too, not just Lyria 3 Pro.
+  const supportsImages = isLyria35 || model === "lyria-3-pro-preview"
 
   const handleTabChange = (v: string) => {
     const next = v as Tab
@@ -65,7 +113,8 @@ export default function MusicPage() {
     setResult(null)
     setError(null)
     setImages([])
-    if (next === "lyria-3-clip-preview") setOutputFormat("mp3")
+    // 3.5 and Clip are MP3-only; measured, response_format does not yield WAV.
+    if (next !== "lyria-3-pro-preview") setOutputFormat("mp3")
   }
 
   const handleAddImages = async (files: FileList | null) => {
@@ -106,11 +155,17 @@ export default function MusicPage() {
     }
     try {
       const imagePayload: MusicImageInput[] | undefined =
-        model === "lyria-3-pro-preview" && images.length > 0
+        supportsImages && images.length > 0
           ? images.map(({ data, mime_type }) => ({ data, mime_type }))
           : undefined
-      const res = await apiClient.generateMusic(prompt, model, outputFormat, imagePayload)
-      const ext = res.mime_type.includes("wav") ? "wav" : "mp3"
+
+      // 3.5 is a different endpoint and returns parsed song structure; the
+      // Lyria 3 models keep the existing call.
+      const res = isLyria35
+        ? await apiClient.generateLyria35(prompt, imagePayload)
+        : await apiClient.generateMusic(prompt, model, outputFormat, imagePayload)
+
+      if (!res.audio_base64) throw new Error("The model returned no audio.")
       const blob = base64ToBlob(res.audio_base64, res.mime_type)
       const url = URL.createObjectURL(blob)
       setResult({
@@ -119,12 +174,14 @@ export default function MusicPage() {
         lyrics: res.lyrics,
         modelUsed: res.model_used,
         prompt,
+        sections: "sections" in res ? res.sections : undefined,
+        isInstrumental: "is_instrumental" in res ? res.is_instrumental : undefined,
+        bytes: "bytes" in res ? res.bytes : undefined,
       })
       // Pre-load audio
       const audio = new Audio(url)
       audioRef.current = audio
       audio.onended = () => setIsPlaying(false)
-      void ext
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Music generation failed")
     } finally {
@@ -162,7 +219,7 @@ export default function MusicPage() {
               Music Generation
             </h1>
             <p className="text-lg text-zinc-700 dark:text-zinc-300">
-              Powered by Lyria 3 — Google&apos;s AI music model
+              Powered by Lyria — Google&apos;s AI music models, 44.1 kHz stereo
             </p>
           </div>
           <ThemeToggle />
@@ -170,6 +227,11 @@ export default function MusicPage() {
 
         <Tabs value={tab} onValueChange={handleTabChange} className="space-y-6">
           <TabsList className="glass-card p-1.5 gap-1">
+            <TabsTrigger value="lyria-3.5">
+              <Sparkles className="mr-2 h-4 w-4" />
+              Lyria 3.5
+              <span className="ml-2 text-xs font-normal opacity-60">Latest</span>
+            </TabsTrigger>
             <TabsTrigger value="lyria-3-clip-preview">
               <Music className="mr-2 h-4 w-4" />
               Lyria 3 Clip
@@ -200,7 +262,9 @@ export default function MusicPage() {
             <CardHeader>
               <CardTitle>Prompt</CardTitle>
               <CardDescription>
-                {model === "lyria-3-clip-preview"
+                {isLyria35
+                  ? "Lyria 3.5 writes full songs with vocals, lyrics and arrangement. Name the genre, instruments, BPM, key and mood; steer length with timestamps."
+                  : model === "lyria-3-clip-preview"
                   ? "Describe a 30-second music clip. Be specific about genre, instruments, mood, and BPM."
                   : "Describe a full-length song. Include structure ([Verse], [Chorus], [Bridge]), tempo, key, and lyric themes."}
               </CardDescription>
@@ -218,7 +282,10 @@ export default function MusicPage() {
               <div className="space-y-1.5">
                 <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">Example prompts:</p>
                 <div className="flex flex-col gap-1.5">
-                  {EXAMPLE_PROMPTS[model].map((ex, i) => (
+                  {(isLyria35
+                    ? LYRIA_35_PRESETS.map((pr) => pr.prompt)
+                    : EXAMPLE_PROMPTS[model]
+                  ).map((ex, i) => (
                     <button
                       key={i}
                       onClick={() => setPrompt(ex)}
@@ -230,8 +297,9 @@ export default function MusicPage() {
                 </div>
               </div>
 
-              {/* WAV option for Pro only */}
-              {model === "lyria-3-pro-preview" && (
+              {/* WAV option for Lyria 3 Pro only. Measured: 3.5 returns MP3
+                  regardless of response_format. */}
+              {!isLyria35 && model === "lyria-3-pro-preview" && (
                 <div className="flex items-center gap-3">
                   <span className="text-sm text-zinc-600 dark:text-zinc-400">Output format:</span>
                   <div className="flex gap-2">
@@ -252,8 +320,8 @@ export default function MusicPage() {
                 </div>
               )}
 
-              {/* Inspiration images for Pro only */}
-              {model === "lyria-3-pro-preview" && (
+              {/* Inspiration images: Lyria 3 Pro and 3.5 both accept them. */}
+              {supportsImages && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-zinc-600 dark:text-zinc-400">
@@ -315,7 +383,7 @@ export default function MusicPage() {
                 {loading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Composing{model === "lyria-3-pro-preview" ? " (this may take a minute…)" : "…"}
+                    Composing{isLyria35 || model === "lyria-3-pro-preview" ? " (this may take a minute…)" : "…"}
                   </>
                 ) : (
                   <>
@@ -338,7 +406,7 @@ export default function MusicPage() {
 
           {/* Result */}
           {result && (
-            <TabsContent value={model} forceMount className="space-y-4 mt-0">
+            <TabsContent value={tab} forceMount className="space-y-4 mt-0">
               {/* Audio player */}
               <Card className="border border-indigo-500/30 bg-indigo-500/5">
                 <CardHeader className="pb-3">
@@ -388,8 +456,50 @@ export default function MusicPage() {
                 </CardContent>
               </Card>
 
-              {/* Lyrics / structure */}
-              {result.lyrics && (
+              {/* Song structure. Lyria 3.5 returns sections the backend has
+                  parsed, so they render as labelled blocks; Lyria 3 only
+                  returns flat text. */}
+              {result.sections && result.sections.length > 0 ? (
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <Mic2 className="h-4 w-4 text-emerald-500" />
+                      Song Structure
+                      <span className="text-xs font-normal text-zinc-500">
+                        {result.sections.length} section{result.sections.length !== 1 ? "s" : ""}
+                        {result.isInstrumental ? " · instrumental" : ""}
+                      </span>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {result.isInstrumental && (
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        No sung lines came back, so this is an instrumental arrangement.
+                        The sections below are the structure the model composed to.
+                      </p>
+                    )}
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {result.sections.map((s, i) => (
+                        <div
+                          key={`${s.label}${s.index}-${i}`}
+                          className="rounded-xl border border-zinc-200/50 dark:border-zinc-800/50 px-3 py-2"
+                        >
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400">
+                            {s.label}{s.index}
+                          </span>
+                          {s.lines.length > 0 ? (
+                            <p className="mt-1.5 text-sm text-zinc-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                              {s.lines.join("\n")}
+                            </p>
+                          ) : (
+                            <p className="mt-1.5 text-xs text-zinc-400 italic">instrumental passage</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : result.lyrics ? (
                 <Card>
                   <CardHeader className="pb-3">
                     <CardTitle className="text-base flex items-center gap-2">
@@ -403,7 +513,7 @@ export default function MusicPage() {
                     </pre>
                   </CardContent>
                 </Card>
-              )}
+              ) : null}
             </TabsContent>
           )}
           </>
