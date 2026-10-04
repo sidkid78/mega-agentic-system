@@ -49,10 +49,12 @@ class Team:
     Workers are re-run until no pending tasks remain (till-done).
     """
 
-    def __init__(self, spec: TeamSpec, registry: TaskRegistry, workspace: str):
+    def __init__(self, spec: TeamSpec, registry: TaskRegistry, workspace: str,
+                 client=None, on_event=None):
         self.spec = spec
         self.registry = registry
         self.workspace = workspace
+        self.on_event = on_event
 
         self.lead = Agent(
             AgentConfig(
@@ -63,6 +65,8 @@ class Team:
                 skills=spec.lead_skills,
                 workspace=workspace,
                 team_id=spec.team_id,
+                client=client,
+                on_event=on_event,
             ),
             registry,
         )
@@ -77,6 +81,8 @@ class Team:
                     skills=w.skills,
                     workspace=workspace,
                     team_id=spec.team_id,
+                    client=client,
+                    on_event=on_event,
                 ),
                 registry,
             )
@@ -195,14 +201,18 @@ class AgentHarness:
         self,
         team_specs: list[TeamSpec],
         workspace: str = "./workspace",
+        client=None,
+        on_event=None,
     ):
         import os
         os.makedirs(workspace, exist_ok=True)
 
         self.workspace = workspace
+        self.on_event = on_event
         self.registry = TaskRegistry(workspace)
         self.teams: dict[str, Team] = {
-            spec.team_id: Team(spec, self.registry, workspace)
+            spec.team_id: Team(spec, self.registry, workspace,
+                               client=client, on_event=on_event)
             for spec in team_specs
         }
 
@@ -214,6 +224,8 @@ class AgentHarness:
                 model=ORCHESTRATOR_MODEL,
                 workspace=workspace,
                 team_id="core",
+                client=client,
+                on_event=on_event,
             ),
             self.registry,
         )
@@ -260,6 +272,21 @@ class AgentHarness:
                 import traceback
                 print(f"\n[Harness] ⚠ Team '{team_id}' FAILED: {res!r}")
                 traceback.print_exception(type(res), res, res.__traceback__)
+                # gather(return_exceptions=True) means a dead team would otherwise
+                # vanish: the run reports success while that team's work is simply
+                # missing. Surface it on the timeline.
+                if self.on_event:
+                    try:
+                        self.on_event({
+                            "agent_id": f"{team_id}_lead",
+                            "agent_role": "lead",
+                            "team_id": team_id,
+                            "kind": "team_failed",
+                            "phase": f"Team {team_id} failed",
+                            "response": f"{type(res).__name__}: {res}",
+                        })
+                    except Exception:
+                        pass
 
         # 3. Till-Done: poll until registry is fully settled
         print("\n[Harness] Waiting for till-done settlement...")
