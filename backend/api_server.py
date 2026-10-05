@@ -172,8 +172,14 @@ from music_realtime import (
 from speech_generation import (
     generate_speech,
     generate_multi_speaker_speech,
+    stream_speech,
     VOICES as TTS_VOICES,
     TTS_MODELS,
+    STREAMING_MODELS as TTS_STREAMING_MODELS,
+    MULTI_SPEAKER_MODELS as TTS_MULTI_SPEAKER_MODELS,
+    DEFAULT_TTS_MODEL,
+    DEFAULT_MULTI_SPEAKER_MODEL,
+    MAX_SPEAKERS as TTS_MAX_SPEAKERS,
 )
 from csv_data_completion_tool import analyze_missing_data
 from build_scout_plan import ScoutPlanBuildOrchestrator
@@ -2077,7 +2083,11 @@ async def music_realtime_ws(websocket: WebSocket):
 class SpeechGenerateRequest(BaseModel):
     prompt: str = Field(..., description="Text to speak; may include style direction in natural language")
     voice: str = Field(default="Kore", description="Prebuilt voice name")
-    model: str = Field(default="gemini-2.5-flash-preview-tts", description="A Gemini TTS model id")
+    model: str = Field(default=DEFAULT_TTS_MODEL, description="A Gemini TTS model id")
+    language: Optional[str] = Field(
+        default=None,
+        description="Optional BCP-47 code (e.g. fr-FR). The models auto-detect, so this only forces one.",
+    )
 
 
 class SpeakerVoice(BaseModel):
@@ -2097,7 +2107,28 @@ def speech_voices_endpoint():
     return {
         "success": True,
         "voices": [{"name": name, "description": desc} for name, desc in TTS_VOICES.items()],
-        "models": TTS_MODELS,
+        "models": [
+            {
+                "id": model,
+                "streaming": model in TTS_STREAMING_MODELS,
+                "multi_speaker": model in TTS_MULTI_SPEAKER_MODELS,
+            }
+            for model in TTS_MODELS
+        ],
+        "defaults": {
+            "model": DEFAULT_TTS_MODEL,
+            "multi_speaker_model": DEFAULT_MULTI_SPEAKER_MODEL,
+            "voice": "Kore",
+        },
+        "max_speakers": TTS_MAX_SPEAKERS,
+        "sample_rate": 24000,
+        "channels": 1,
+        # The 3.8 models reject multi-speaker unless every text part carries
+        # speech_metadata.speaker, which google-genai 2.6.0 cannot express.
+        "multi_speaker_note": (
+            "The 3.8 models do not support multi-speaker through the current SDK; "
+            "use a 3.1 or 2.5 model for conversations."
+        ),
     }
 
 
@@ -2109,6 +2140,7 @@ def speech_generate_endpoint(request: SpeechGenerateRequest, ai_client: genai.Cl
             prompt=request.prompt,
             voice=request.voice,
             model=request.model,
+            language=request.language,
             client=ai_client,
         )
         return {"success": True, **result}
@@ -2118,6 +2150,53 @@ def speech_generate_endpoint(request: SpeechGenerateRequest, ai_client: genai.Cl
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/speech/stream")
+def speech_stream_endpoint(
+    request: SpeechGenerateRequest,
+    ai_client: genai.Client = Depends(get_gemini_client),
+):
+    """Stream speech audio as it is generated, as server-sent events.
+
+    Only the 3.1+ TTS models support this, and it runs through the Interactions
+    API. Chunks are raw PCM fragments of one continuous stream, base64-encoded
+    - not standalone WAV files - so the client concatenates them and wraps the
+    result once. Measured on gemini-3.8-flash-tts: first chunk at ~1.7s, 6.3s
+    of audio delivered in 4.2s.
+
+    Event data is JSON, one object per line:
+      {"type":"audio","data":<base64 pcm>,"index":n}
+      {"type":"done","chunks":n,"bytes":n}
+      {"type":"error","message":str}
+    """
+    def event_stream():
+        try:
+            for event in stream_speech(
+                prompt=request.prompt,
+                voice=request.voice,
+                model=request.model,
+                language=request.language,
+                client=ai_client,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except ValueError as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        except Exception as e:
+            logger.error(f"Speech streaming failed: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Proxies buffer by default, which would hold the whole stream back.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/speech/generate-multi")

@@ -153,6 +153,30 @@ export type AssistantStreamEvent =
   | { type: "done"; text: string }
   | { type: "error"; message: string };
 
+/** One event from POST /speech/stream. Audio chunks are raw PCM fragments of a
+ *  single stream, base64-encoded - concatenate before wrapping as WAV. */
+export type SpeechStreamEvent =
+  | { type: "audio"; data: string; index: number }
+  | { type: "done"; chunks: number; bytes: number }
+  | { type: "error"; message: string };
+
+export interface SpeechModelInfo {
+  id: string;
+  streaming: boolean;
+  multi_speaker: boolean;
+}
+
+export interface SpeechVoicesResponse {
+  success: boolean;
+  voices: Array<{ name: string; description: string }>;
+  models: SpeechModelInfo[];
+  defaults: { model: string; multi_speaker_model: string; voice: string };
+  max_speakers: number;
+  sample_rate: number;
+  channels: number;
+  multi_speaker_note: string;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -897,17 +921,71 @@ class ApiClient {
     prompt: string;
     voice?: string;
     model?: string;
+    /** Optional BCP-47 code (e.g. "fr-FR"). Models auto-detect; this forces one. */
+    language?: string;
   }): Promise<{
     success: boolean;
     audio_base64: string;
     mime_type: string;
     voice: string;
+    language: string | null;
     model_used: string;
   }> {
     return this.request("/speech/generate", {
       method: "POST",
       body: JSON.stringify(request),
     });
+  }
+
+  /** Stream speech audio as it is generated. 3.1+ TTS models only.
+   *
+   *  Chunks are raw PCM fragments of one continuous stream, base64-encoded -
+   *  not standalone WAV files - so collect them and call pcmChunksToWavBlob
+   *  once rather than trying to play each one. */
+  async *streamSpeech(
+    request: { prompt: string; voice?: string; model?: string; language?: string },
+    signal?: AbortSignal,
+  ): AsyncGenerator<SpeechStreamEvent> {
+    const response = await fetch(`${this.baseUrl}/speech/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...apiKeyHeader() },
+      body: JSON.stringify(request),
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      const detail = await response.text().catch(() => response.statusText);
+      throw new ApiError(detail || `HTTP error! status: ${response.status}`, response.status);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          const line = frame.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          const payload = line.slice(6);
+          if (payload === "[DONE]") return;
+          try {
+            yield JSON.parse(payload) as SpeechStreamEvent;
+          } catch {
+            // a malformed frame should not kill the stream
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  async getSpeechVoices(): Promise<SpeechVoicesResponse> {
+    return this.request("/speech/voices");
   }
 
   async generateMultiSpeakerSpeech(request: {
