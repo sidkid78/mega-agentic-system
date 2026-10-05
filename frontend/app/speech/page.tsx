@@ -52,10 +52,33 @@ const VOICES: Array<{ name: string; description: string }> = [
   { name: "Sulafat", description: "Warm" },
 ]
 
-const MODELS: Array<{ id: string; label: string }> = [
-  { id: "gemini-2.5-flash-preview-tts", label: "2.5 Flash TTS (Fast)" },
-  { id: "gemini-2.5-pro-preview-tts", label: "2.5 Pro TTS (Highest quality)" },
-  { id: "gemini-3.1-flash-tts-preview", label: "3.1 Flash TTS (Newest preview)" },
+const MODELS: Array<{ id: string; label: string; streaming: boolean; multiSpeaker: boolean }> = [
+  { id: "gemini-3.8-flash-tts", label: "3.8 Flash TTS (Newest)", streaming: true, multiSpeaker: false },
+  { id: "gemini-3.8-flash-lite-tts", label: "3.8 Flash Lite TTS (Fastest)", streaming: true, multiSpeaker: false },
+  { id: "gemini-3.1-flash-tts-preview", label: "3.1 Flash TTS", streaming: true, multiSpeaker: true },
+  { id: "gemini-2.5-flash-preview-tts", label: "2.5 Flash TTS", streaming: false, multiSpeaker: true },
+  { id: "gemini-2.5-pro-preview-tts", label: "2.5 Pro TTS (Highest quality)", streaming: false, multiSpeaker: true },
+]
+
+// The 3.8 models reject multi-speaker unless every text part carries
+// speech_metadata.speaker, which the installed SDK cannot send. Rather than
+// let someone pick a model that will 400, the conversation tab only offers
+// the models that work.
+const MULTI_SPEAKER_MODELS = MODELS.filter((m) => m.multiSpeaker)
+
+const LANGUAGES: Array<{ code: string; label: string }> = [
+  { code: "", label: "Auto-detect" },
+  { code: "en-US", label: "English (US)" },
+  { code: "en-GB", label: "English (UK)" },
+  { code: "fr-FR", label: "French" },
+  { code: "de-DE", label: "German" },
+  { code: "es-ES", label: "Spanish" },
+  { code: "it-IT", label: "Italian" },
+  { code: "pt-BR", label: "Portuguese (BR)" },
+  { code: "ja-JP", label: "Japanese" },
+  { code: "ko-KR", label: "Korean" },
+  { code: "hi-IN", label: "Hindi" },
+  { code: "ar-EG", label: "Arabic" },
 ]
 
 const STYLE_TAGS = ["[whispers]", "[excitedly]", "[laughs]", "[sighs]", "[shouting]", "Say cheerfully:"]
@@ -65,6 +88,50 @@ interface SpeechResult {
   mimeType: string
   modelUsed: string
   label: string
+}
+
+/** Join base64 PCM chunks from the speech stream into one playable WAV.
+ *  The chunks have no headers of their own: they are fragments of a single
+ *  24 kHz mono 16-bit stream, so one RIFF header goes on the front of the lot. */
+function pcmChunksToWavBlob(chunks: string[]): Blob {
+  const parts = chunks.map((c) => {
+    const binary = atob(c)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  })
+  const dataLength = parts.reduce((n, p) => n + p.length, 0)
+  const buffer = new ArrayBuffer(44 + dataLength)
+  const view = new DataView(buffer)
+  const writeAscii = (offset: number, text: string) => {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i))
+  }
+  const sampleRate = 24000
+  const channels = 1
+  const bitsPerSample = 16
+  const byteRate = (sampleRate * channels * bitsPerSample) / 8
+
+  writeAscii(0, "RIFF")
+  view.setUint32(4, 36 + dataLength, true)
+  writeAscii(8, "WAVE")
+  writeAscii(12, "fmt ")
+  view.setUint32(16, 16, true)        // PCM header size
+  view.setUint16(20, 1, true)         // PCM format
+  view.setUint16(22, channels, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, byteRate, true)
+  view.setUint16(32, (channels * bitsPerSample) / 8, true)
+  view.setUint16(34, bitsPerSample, true)
+  writeAscii(36, "data")
+  view.setUint32(40, dataLength, true)
+
+  const out = new Uint8Array(buffer)
+  let offset = 44
+  for (const part of parts) {
+    out.set(part, offset)
+    offset += part.length
+  }
+  return new Blob([buffer], { type: "audio/wav" })
 }
 
 function base64ToBlob(base64: string, mimeType: string): Blob {
@@ -78,7 +145,10 @@ export default function SpeechPage() {
   // Single-speaker state
   const [prompt, setPrompt] = useState("")
   const [voice, setVoice] = useState("Kore")
-  const [model, setModel] = useState("gemini-2.5-flash-preview-tts")
+  const [model, setModel] = useState("gemini-3.8-flash-tts")
+  const [language, setLanguage] = useState("")
+  const [streaming, setStreaming] = useState(true)
+  const [streamProgress, setStreamProgress] = useState<{ chunks: number; seconds: number } | null>(null)
 
   // Multi-speaker state
   const [convoPrompt, setConvoPrompt] = useState("")
@@ -86,7 +156,7 @@ export default function SpeechPage() {
   const [speaker1Voice, setSpeaker1Voice] = useState("Kore")
   const [speaker2Name, setSpeaker2Name] = useState("Jane")
   const [speaker2Voice, setSpeaker2Voice] = useState("Puck")
-  const [multiModel, setMultiModel] = useState("gemini-2.5-flash-preview-tts")
+  const [multiModel, setMultiModel] = useState("gemini-3.1-flash-tts-preview")
 
   // Shared state
   const [loading, setLoading] = useState(false)
@@ -97,24 +167,56 @@ export default function SpeechPage() {
     setPrompt((p) => (p ? `${tag} ${p}` : `${tag} `))
   }
 
+  const modelInfo = MODELS.find((m) => m.id === model)
+  const canStream = Boolean(modelInfo?.streaming)
+
   const handleGenerateSingle = async () => {
     if (!prompt.trim()) return
     setLoading(true)
     setError(null)
     setResult(null)
+    setStreamProgress(null)
+    const lang = language || undefined
     try {
-      const res = await apiClient.generateSpeech({ prompt, voice, model })
-      const blob = base64ToBlob(res.audio_base64, res.mime_type)
-      setResult({
-        audioUrl: URL.createObjectURL(blob),
-        mimeType: res.mime_type,
-        modelUsed: res.model_used,
-        label: `${res.voice} · ${res.model_used}`,
-      })
+      if (streaming && canStream) {
+        // Chunks are PCM fragments of one stream, so they are collected and
+        // wrapped as a single WAV at the end - wrapping each chunk would
+        // produce a sequence of unplayable snippets.
+        const chunks: string[] = []
+        let bytes = 0
+        for await (const ev of apiClient.streamSpeech({ prompt, voice, model, language: lang })) {
+          if (ev.type === "audio") {
+            chunks.push(ev.data)
+            bytes += Math.floor((ev.data.length * 3) / 4)
+            // 24 kHz, mono, 16-bit => 48000 bytes per second.
+            setStreamProgress({ chunks: chunks.length, seconds: bytes / 48000 })
+          } else if (ev.type === "error") {
+            throw new Error(ev.message)
+          }
+        }
+        if (chunks.length === 0) throw new Error("No audio was streamed.")
+        const blob = pcmChunksToWavBlob(chunks)
+        setResult({
+          audioUrl: URL.createObjectURL(blob),
+          mimeType: "audio/wav",
+          modelUsed: model,
+          label: `${voice} · ${model} · streamed`,
+        })
+      } else {
+        const res = await apiClient.generateSpeech({ prompt, voice, model, language: lang })
+        const blob = base64ToBlob(res.audio_base64, res.mime_type)
+        setResult({
+          audioUrl: URL.createObjectURL(blob),
+          mimeType: res.mime_type,
+          modelUsed: res.model_used,
+          label: `${res.voice} · ${res.model_used}`,
+        })
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Speech generation failed")
     } finally {
       setLoading(false)
+      setStreamProgress(null)
     }
   }
 
@@ -250,7 +352,56 @@ export default function SpeechPage() {
                       </SelectContent>
                     </Select>
                   </div>
+                  <div className="space-y-2">
+                    <label htmlFor="language" className="text-sm font-medium">Language</label>
+                    <Select value={language || "auto"} onValueChange={(v) => setLanguage(v === "auto" ? "" : v)}>
+                      <SelectTrigger id="language">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {LANGUAGES.map((l) => (
+                          <SelectItem key={l.code || "auto"} value={l.code || "auto"}>{l.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
+
+                {/* Streaming: audio starts arriving in about two seconds
+                    instead of waiting for the whole clip. */}
+                <div className="flex items-center justify-between rounded-xl border border-zinc-200/50 dark:border-zinc-800/50 px-3 py-2">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">Stream audio</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                      {canStream
+                        ? "First audio in ~2s instead of waiting for the full clip."
+                        : `${modelInfo?.label ?? model} does not support streaming.`}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={streaming && canStream}
+                    aria-label="Stream audio"
+                    disabled={!canStream}
+                    onClick={() => setStreaming((s) => !s)}
+                    className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 ${
+                      streaming && canStream ? "bg-indigo-500" : "bg-zinc-300 dark:bg-zinc-700"
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
+                        streaming && canStream ? "translate-x-5" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {streamProgress && (
+                  <p className="text-xs font-mono text-indigo-500">
+                    streaming… {streamProgress.chunks} chunks · {streamProgress.seconds.toFixed(1)}s of audio
+                  </p>
+                )}
 
                 <Button
                   onClick={handleGenerateSingle}
@@ -325,11 +476,15 @@ export default function SpeechPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {MODELS.map((m) => (
+                      {MULTI_SPEAKER_MODELS.map((m) => (
                         <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    The 3.8 models are single-speaker only for now: they require a
+                    speaker tag on every text part, which the current SDK cannot send.
+                  </p>
                 </div>
 
                 <Button
