@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
 import { geminiClient, missingKeyResponse } from "@/lib/server-gemini"
+import { startOmniVideo, type OmniMedia } from "@/lib/omni-video"
 
-export const maxDuration = 60
+// Image uploads happen here (bounded), but the multi-minute generation is
+// offloaded to a background interaction, so this stays well under serverless
+// duration caps. The client then polls /api/videos/poll.
+export const maxDuration = 300
 
 // ECONNRESET / "fetch failed" reaching the Gemini API is transient — retry with backoff.
 function isTransientNetworkError(err: unknown): boolean {
@@ -36,71 +40,50 @@ export async function POST(req: NextRequest) {
         const ai = geminiClient(req)
         if (!ai) return missingKeyResponse()
 
-        const body = await req.json()
+        const body = (await req.json()) as {
+            prompt?: string
+            model?: string
+            aspectRatio?: string
+            resolution?: string
+            durationSeconds?: string | number
+            images?: OmniMedia[]
+            video?: OmniMedia
+            previousInteractionId?: string
+        }
+
         const {
             prompt,
-            model = "veo-3.1-generate-preview",
+            model,
             aspectRatio = "16:9",
             resolution = "720p",
-            durationSeconds = 8,
-            // image-to-video / interpolation
-            imageBase64,
-            imageMimeType,
-            // last frame interpolation
-            lastFrameBase64,
-            lastFrameMimeType,
-            // reference images (up to 3)
-            referenceImages,
-            // video extension
-            videoBase64,
-            videoMimeType,
+            durationSeconds,
+            images = [],
+            video,
+            previousInteractionId,
         } = body
 
-        if (!prompt && !videoBase64) {
-            return NextResponse.json({ error: "prompt is required" }, { status: 400 })
+        // A refinement turn needs only a prompt; a first turn needs a prompt or media.
+        if (!prompt?.trim() && images.length === 0 && !video) {
+            return NextResponse.json(
+                { error: "prompt is required" },
+                { status: 400 },
+            )
         }
 
-        // Build config
-        const config: Record<string, unknown> = {
-            aspectRatio,
-            resolution,
-            durationSeconds: Number(durationSeconds),
-        }
+        const interactionId = await withRetry(() =>
+            startOmniVideo(ai, {
+                prompt,
+                model,
+                aspectRatio,
+                resolution,
+                durationSeconds,
+                images,
+                video,
+                previousInteractionId,
+            }),
+        )
 
-        // Reference images
-        if (referenceImages && referenceImages.length > 0) {
-            config.referenceImages = referenceImages.map((ref: { imageBase64: string; mimeType: string }) => ({
-                image: { imageBytes: ref.imageBase64, mimeType: ref.mimeType },
-                referenceType: "asset",
-            }))
-        }
-
-        // Last frame for interpolation
-        if (lastFrameBase64) {
-            config.lastFrame = { imageBytes: lastFrameBase64, mimeType: lastFrameMimeType || "image/png" }
-        }
-
-        // Build generate call params
-        const params: Record<string, unknown> = {
-            model,
-            prompt: prompt || "",
-            config,
-        }
-
-        // Image as first frame (image-to-video or interpolation)
-        if (imageBase64) {
-            params.image = { imageBytes: imageBase64, mimeType: imageMimeType || "image/png" }
-        }
-
-        // Video extension
-        if (videoBase64) {
-            params.video = { videoBytes: videoBase64, mimeType: videoMimeType || "video/mp4" }
-        }
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const operation = await withRetry<{ name?: string }>(() => (ai.models as any).generateVideos(params))
-
-        return NextResponse.json({ operationName: operation.name })
+        return NextResponse.json({ interactionId })
     } catch (err: unknown) {
         console.error("Video generate error:", err)
         const message = err instanceof Error ? err.message : "Failed to start video generation"

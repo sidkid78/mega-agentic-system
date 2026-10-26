@@ -15,6 +15,11 @@ import {
 import { Loader2, Video, Download, Upload, X, Plus } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { apiKeyHeader } from "@/lib/api-key"
+import {
+    OMNI_RESOLUTIONS,
+    OMNI_DURATIONS,
+    OMNI_MAX_INPUT_VIDEO_SECONDS,
+} from "@/lib/omni-video-options"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -104,6 +109,9 @@ function fileToBase64(
     })
 }
 
+// Gemini Omni Flash — background interaction + polling (serverless-friendly).
+// startGeneration kicks off a background job; pollInteraction checks it until
+// the video is ready.
 async function startGeneration(payload: Record<string, unknown>): Promise<string> {
     const res = await fetch("/api/videos/generate", {
         method: "POST",
@@ -125,53 +133,17 @@ async function startGeneration(payload: Record<string, unknown>): Promise<string
         throw new Error(errorMsg)
     }
     const data = await res.json()
-    return data.operationName as string
+    return data.interactionId as string
 }
 
-async function pollOperation(operationName: string): Promise<VideoResult | null> {
-    const res = await fetch(`/api/videos/poll?op=${encodeURIComponent(operationName)}`, {
+async function pollInteraction(
+    id: string,
+): Promise<(VideoResult & { interactionId: string }) | null> {
+    const res = await fetch(`/api/videos/poll?id=${encodeURIComponent(id)}`, {
         headers: { ...apiKeyHeader() },
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || "Poll failed")
-    if (!data.done) return null
-    return { videoBase64: data.videoBase64, mimeType: data.mimeType }
-}
-
-// Gemini Omni Flash — background interaction + polling (serverless-friendly).
-// startOmni kicks off a background job; pollOmni checks it until the video is ready.
-async function startOmni(payload: Record<string, unknown>): Promise<string> {
-    const res = await fetch("/api/videos/omni/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...apiKeyHeader() },
-        body: JSON.stringify(payload),
-    })
-    if (!res.ok) {
-        let errorMsg = `Omni generation failed (HTTP ${res.status})`
-        if (res.status === 413) {
-            errorMsg = "Payload too large (413). The uploaded image or video exceeds the size limit. Please upload a smaller file."
-        } else {
-            try {
-                const data = await res.json()
-                if (data.error) errorMsg = data.error
-            } catch {
-                // Ignore json parse error for non-json responses
-            }
-        }
-        throw new Error(errorMsg)
-    }
-    const data = await res.json()
-    return data.interactionId as string
-}
-
-async function pollOmni(
-    id: string,
-): Promise<(VideoResult & { interactionId: string }) | null> {
-    const res = await fetch(`/api/videos/omni/poll?id=${encodeURIComponent(id)}`, {
-        headers: { ...apiKeyHeader() },
-    })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error || "Omni poll failed")
     if (!data.done) return null
     return {
         videoBase64: data.videoBase64,
@@ -316,7 +288,7 @@ function VideoDropZone({
                 >
                     <Upload className="h-6 w-6 text-zinc-400 mb-2" />
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                        Upload a Veo-generated video (.mp4)
+                        Upload a video (.mp4)
                     </p>
                 </div>
             )}
@@ -334,9 +306,17 @@ function VideoDropZone({
     )
 }
 
+// Omni's option surface: aspect ratio, resolution (360p–4K, 1080p and 4K via
+// upscaling) and duration (3–10s at 24 FPS). Unlike Veo, no resolution locks
+// the clip to a fixed length, so every combination here is valid.
+const RESOLUTION_LABELS: Record<string, string> = {
+    "360p": "360P (Draft)",
+    "720p": "720P (Default)",
+    "1080p": "1080P (Upscaled)",
+    "4k": "4K (Upscaled)",
+}
+
 function VideoConfigPanel({
-    model,
-    onModelChange,
     aspectRatio,
     onAspectRatioChange,
     resolution,
@@ -344,40 +324,18 @@ function VideoConfigPanel({
     durationSeconds,
     onDurationChange,
 }: {
-    model: string
-    onModelChange: (v: string) => void
     aspectRatio: string
     onAspectRatioChange: (v: string) => void
     resolution: string
     onResolutionChange: (v: string) => void
-    durationSeconds: string
-    onDurationChange: (v: string) => void
+    /** Omit the duration control entirely by leaving these out. */
+    durationSeconds?: string
+    onDurationChange?: (v: string) => void
 }) {
-    const isLite = model.includes("lite")
-    const resolutions = isLite ? ["720p", "1080p"] : ["720p", "1080p", "4k"]
-    // 1080p and 4k only support 8s
-    const durations =
-        resolution === "1080p" || resolution === "4k" ? ["8"] : ["4", "6", "8"]
+    const hasDuration = durationSeconds !== undefined && onDurationChange !== undefined
 
     return (
-        <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-                <label className="text-sm font-medium">Model</label>
-                <Select value={model} onValueChange={onModelChange}>
-                    <SelectTrigger>
-                        <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                        <SelectItem value="veo-3.1-generate-preview">Veo 3.1 (Best quality)</SelectItem>
-                        <SelectItem value="veo-3.1-fast-generate-preview">Veo 3.1 Fast</SelectItem>
-                        <SelectItem value="veo-3.1-lite-generate-preview">Veo 3.1 Lite</SelectItem>
-                        <SelectItem value="veo-3.0-generate-001">Veo 3.0 (Stable)</SelectItem>
-                        <SelectItem value="veo-3.0-fast-generate-001">Veo 3.0 Fast (Stable)</SelectItem>
-                        <SelectItem value="veo-2.0-generate-001">Veo 2.0</SelectItem>
-                    </SelectContent>
-                </Select>
-            </div>
-
+        <div className={`grid gap-4 ${hasDuration ? "grid-cols-3" : "grid-cols-2"}`}>
             <div className="space-y-2">
                 <label className="text-sm font-medium">Aspect Ratio</label>
                 <Select value={aspectRatio} onValueChange={onAspectRatioChange}>
@@ -393,41 +351,37 @@ function VideoConfigPanel({
 
             <div className="space-y-2">
                 <label className="text-sm font-medium">Resolution</label>
-                <Select
-                    value={resolution}
-                    onValueChange={(v) => {
-                        onResolutionChange(v)
-                        if (v === "1080p" || v === "4k") onDurationChange("8")
-                    }}
-                >
+                <Select value={resolution} onValueChange={onResolutionChange}>
                     <SelectTrigger>
                         <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                        {resolutions.map((r) => (
+                        {OMNI_RESOLUTIONS.map((r) => (
                             <SelectItem key={r} value={r}>
-                                {r.toUpperCase()}{r !== "720p" ? " (8s only)" : ""}
+                                {RESOLUTION_LABELS[r] ?? r.toUpperCase()}
                             </SelectItem>
                         ))}
                     </SelectContent>
                 </Select>
             </div>
 
-            <div className="space-y-2">
-                <label className="text-sm font-medium">Duration</label>
-                <Select value={durationSeconds} onValueChange={onDurationChange}>
-                    <SelectTrigger>
-                        <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                        {durations.map((d) => (
-                            <SelectItem key={d} value={d}>
-                                {d} seconds
-                            </SelectItem>
-                        ))}
-                    </SelectContent>
-                </Select>
-            </div>
+            {hasDuration && (
+                <div className="space-y-2">
+                    <label className="text-sm font-medium">Duration</label>
+                    <Select value={durationSeconds} onValueChange={onDurationChange}>
+                        <SelectTrigger>
+                            <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                            {OMNI_DURATIONS.map((d) => (
+                                <SelectItem key={d} value={d}>
+                                    {d} seconds
+                                </SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                </div>
+            )}
         </div>
     )
 }
@@ -438,7 +392,7 @@ function VideoOutput({
     statusMsg,
     error,
     tabKey,
-    latencyHint = "Veo 3.1 typically takes 30s–6 min",
+    latencyHint = "Gemini Omni Flash typically takes 30s–3 min",
 }: {
     result: VideoResult | null
     isLoading: boolean
@@ -504,7 +458,7 @@ function VideoOutput({
                             size="sm"
                             className="w-full"
                             onClick={() =>
-                                downloadVideo(result!.videoBase64, result!.mimeType, `veo-${tabKey}.mp4`)
+                                downloadVideo(result!.videoBase64, result!.mimeType, `omni-${tabKey}.mp4`)
                             }
                         >
                             <Download className="mr-2 h-4 w-4" />
@@ -519,56 +473,10 @@ function VideoOutput({
 
 // ─── Polling hook ─────────────────────────────────────────────────────────────
 
+// Every tab runs the same Omni interaction: start a background job, then poll.
+// The interactionId is threaded back out so any result can be refined or
+// extended turn-by-turn without re-uploading the source.
 function useVideoGeneration() {
-    const [isLoading, setIsLoading] = useState(false)
-    const [statusMsg, setStatusMsg] = useState("")
-    const [result, setResult] = useState<VideoResult | null>(null)
-    const [error, setError] = useState<string | null>(null)
-
-    const generate = useCallback(async (payload: Record<string, unknown>) => {
-        setIsLoading(true)
-        setError(null)
-        setResult(null)
-        setStatusMsg("Submitting to Veo 3.1…")
-
-        try {
-            const operationName = await startGeneration(payload)
-            setStatusMsg("Generation started — polling for completion…")
-
-            let attempts = 0
-            const maxAttempts = 72 // 72 × 10s = 12 min ceiling
-
-            const poll = async (): Promise<void> => {
-                if (attempts >= maxAttempts) {
-                    throw new Error("Timed out waiting for video generation")
-                }
-                attempts++
-                setStatusMsg(`Waiting… (${attempts * 10}s elapsed)`)
-
-                const video = await pollOperation(operationName)
-                if (video) {
-                    setResult(video)
-                    return
-                }
-                await new Promise((r) => setTimeout(r, 10000))
-                return poll()
-            }
-
-            await poll()
-        } catch (err: unknown) {
-            setError(err instanceof Error ? err.message : "Generation failed")
-        } finally {
-            setIsLoading(false)
-            setStatusMsg("")
-        }
-    }, [])
-
-    return { isLoading, statusMsg, result, error, generate }
-}
-
-// Omni is a single blocking request (no polling), and it threads an
-// interactionId through so the result can be refined turn-by-turn.
-function useOmniGeneration() {
     const [isLoading, setIsLoading] = useState(false)
     const [statusMsg, setStatusMsg] = useState("")
     const [result, setResult] = useState<VideoResult | null>(null)
@@ -590,7 +498,7 @@ function useOmniGeneration() {
         )
 
         try {
-            const id = await startOmni(payload)
+            const id = await startGeneration(payload)
             setInteractionId(id)
             setStatusMsg("Generation started — polling for completion…")
 
@@ -599,12 +507,12 @@ function useOmniGeneration() {
 
             const poll = async (): Promise<void> => {
                 if (attempts >= maxAttempts) {
-                    throw new Error("Timed out waiting for Omni video")
+                    throw new Error("Timed out waiting for video generation")
                 }
                 attempts++
                 setStatusMsg(`Waiting… (${attempts * 10}s elapsed)`)
 
-                const out = await pollOmni(id)
+                const out = await pollInteraction(id)
                 if (out) {
                     setResult({ videoBase64: out.videoBase64, mimeType: out.mimeType })
                     setInteractionId(out.interactionId)
@@ -616,7 +524,7 @@ function useOmniGeneration() {
 
             await poll()
         } catch (err: unknown) {
-            setError(err instanceof Error ? err.message : "Omni generation failed")
+            setError(err instanceof Error ? err.message : "Generation failed")
         } finally {
             setIsLoading(false)
             setStatusMsg("")
@@ -633,7 +541,6 @@ export default function VideosPage() {
 
     // ── Text-to-video state
     const [txtPrompt, setTxtPrompt] = useState("")
-    const [txtModel, setTxtModel] = useState("veo-3.1-generate-preview")
     const [txtAspect, setTxtAspect] = useState("16:9")
     const [txtRes, setTxtRes] = useState("720p")
     const [txtDur, setTxtDur] = useState("8")
@@ -642,7 +549,6 @@ export default function VideosPage() {
     // ── Image-to-video state
     const [img2vPrompt, setImg2vPrompt] = useState("")
     const [img2vImage, setImg2vImage] = useState<{ base64: string; mimeType: string; preview: string } | null>(null)
-    const [img2vModel, setImg2vModel] = useState("veo-3.1-generate-preview")
     const [img2vAspect, setImg2vAspect] = useState("16:9")
     const [img2vRes, setImg2vRes] = useState("720p")
     const [img2vDur, setImg2vDur] = useState("8")
@@ -651,7 +557,6 @@ export default function VideosPage() {
     // ── Reference images state
     const [refPrompt, setRefPrompt] = useState("")
     const [refImages, setRefImages] = useState<(ReferenceImageSlot | null)[]>([null, null, null])
-    const [refModel, setRefModel] = useState("veo-3.1-generate-preview")
     const [refAspect, setRefAspect] = useState("16:9")
     const [refRes, setRefRes] = useState("720p")
     const [refDur, setRefDur] = useState("8")
@@ -661,25 +566,27 @@ export default function VideosPage() {
     const [interpPrompt, setInterpPrompt] = useState("")
     const [interpFirst, setInterpFirst] = useState<{ base64: string; mimeType: string; preview: string } | null>(null)
     const [interpLast, setInterpLast] = useState<{ base64: string; mimeType: string; preview: string } | null>(null)
-    const [interpModel, setInterpModel] = useState("veo-3.1-generate-preview")
     const [interpAspect, setInterpAspect] = useState("16:9")
     const [interpRes, setInterpRes] = useState("720p")
+    const [interpDur, setInterpDur] = useState("8")
     const interpGen = useVideoGeneration()
 
     // ── Extension state
     const [extPrompt, setExtPrompt] = useState("")
     const [extVideo, setExtVideo] = useState<{ base64: string; mimeType: string } | null>(null)
-    const [extModel, setExtModel] = useState("veo-3.1-generate-preview")
     const [extAspect, setExtAspect] = useState("16:9")
+    const [extRes, setExtRes] = useState("720p")
+    const [extDur, setExtDur] = useState("8")
     const extGen = useVideoGeneration()
 
     // ── Omni editing state (Gemini Omni Flash)
     const [omniPrompt, setOmniPrompt] = useState("")
     const [omniVideo, setOmniVideo] = useState<{ base64: string; mimeType: string } | null>(null)
     const [omniAspect, setOmniAspect] = useState("16:9")
+    const [omniRes, setOmniRes] = useState("720p")
     const [omniDuration, setOmniDuration] = useState("none")
     const [omniRefinePrompt, setOmniRefinePrompt] = useState("")
-    const omniGen = useOmniGeneration()
+    const omniGen = useVideoGeneration()
 
     // ── Handlers ──
 
@@ -687,7 +594,6 @@ export default function VideosPage() {
         if (!txtPrompt.trim()) return
         txtGen.generate({
             prompt: txtPrompt,
-            model: txtModel,
             aspectRatio: txtAspect,
             resolution: txtRes,
             durationSeconds: txtDur,
@@ -698,12 +604,10 @@ export default function VideosPage() {
         if (!img2vPrompt.trim() || !img2vImage) return
         img2vGen.generate({
             prompt: img2vPrompt,
-            model: img2vModel,
             aspectRatio: img2vAspect,
             resolution: img2vRes,
             durationSeconds: img2vDur,
-            imageBase64: img2vImage.base64,
-            imageMimeType: img2vImage.mimeType,
+            images: [{ base64: img2vImage.base64, mimeType: img2vImage.mimeType }],
         })
     }
 
@@ -712,43 +616,41 @@ export default function VideosPage() {
         if (!refPrompt.trim() || filled.length === 0) return
         refGen.generate({
             prompt: refPrompt,
-            model: refModel,
             aspectRatio: refAspect,
             resolution: refRes,
             durationSeconds: refDur,
-            referenceImages: filled.map((r) => ({
-                imageBase64: r.base64,
-                mimeType: r.mimeType,
-            })),
+            images: filled.map((r) => ({ base64: r.base64, mimeType: r.mimeType })),
         })
     }
 
+    // Two images are read as first and last frame; one alone just seeds the clip.
     const handleInterp = () => {
         if (!interpFirst) return
         interpGen.generate({
             prompt: interpPrompt,
-            model: interpModel,
             aspectRatio: interpAspect,
             resolution: interpRes,
-            durationSeconds: "8", // interpolation requires 8s
-            imageBase64: interpFirst.base64,
-            imageMimeType: interpFirst.mimeType,
-            ...(interpLast
-                ? { lastFrameBase64: interpLast.base64, lastFrameMimeType: interpLast.mimeType }
-                : {}),
+            durationSeconds: interpDur,
+            images: [
+                { base64: interpFirst.base64, mimeType: interpFirst.mimeType },
+                ...(interpLast
+                    ? [{ base64: interpLast.base64, mimeType: interpLast.mimeType }]
+                    : []),
+            ],
         })
     }
 
+    // Extension continues either an uploaded clip or the last clip Omni made.
     const handleExtend = () => {
-        if (!extVideo) return
+        if (!extVideo && !extGen.interactionId) return
         extGen.generate({
-            prompt: extPrompt,
-            model: extModel,
+            prompt: extPrompt.trim() || "Continue the scene.",
             aspectRatio: extAspect,
-            resolution: "720p", // extension is 720p only
-            durationSeconds: "8",
-            videoBase64: extVideo.base64,
-            videoMimeType: extVideo.mimeType,
+            resolution: extRes,
+            durationSeconds: extDur,
+            ...(extVideo
+                ? { video: { base64: extVideo.base64, mimeType: extVideo.mimeType } }
+                : { previousInteractionId: extGen.interactionId }),
         })
     }
 
@@ -757,7 +659,8 @@ export default function VideosPage() {
         omniGen.generate({
             prompt: omniPrompt,
             aspectRatio: omniAspect,
-            ...(omniDuration !== "none" ? { duration: omniDuration } : {}),
+            resolution: omniRes,
+            ...(omniDuration !== "none" ? { durationSeconds: omniDuration } : {}),
             ...(omniVideo ? { video: { base64: omniVideo.base64, mimeType: omniVideo.mimeType } } : {}),
         })
     }
@@ -767,7 +670,8 @@ export default function VideosPage() {
         omniGen.generate({
             prompt: omniRefinePrompt,
             aspectRatio: omniAspect,
-            ...(omniDuration !== "none" ? { duration: omniDuration } : {}),
+            resolution: omniRes,
+            ...(omniDuration !== "none" ? { durationSeconds: omniDuration } : {}),
             previousInteractionId: omniGen.interactionId,
         })
         setOmniRefinePrompt("")
@@ -795,17 +699,20 @@ export default function VideosPage() {
                             🎬 Video Generation
                         </h1>
                         <p className="text-lg text-zinc-700 dark:text-zinc-300">
-                            Generate stunning 8-second HD videos with Veo 3.1
+                            Generate, edit and extend 3–10s videos with Gemini Omni Flash
                         </p>
-                        <div className="flex items-center gap-2 mt-3">
+                        <div className="flex items-center gap-2 mt-3 flex-wrap">
                             <span className="px-3 py-1 rounded-full bg-indigo-500/20 border border-indigo-500/50 text-xs font-semibold text-indigo-600 dark:text-indigo-400">
-                                ⚡ POWERED BY VEO 3.1
+                                ⚡ POWERED BY GEMINI OMNI FLASH
                             </span>
                             <span className="px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/50 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
                                 🎵 NATIVE AUDIO
                             </span>
+                            <span className="px-3 py-1 rounded-full bg-sky-500/20 border border-sky-500/50 text-xs font-semibold text-sky-600 dark:text-sky-400">
+                                🖼 UP TO 4K
+                            </span>
                             <span className="px-3 py-1 rounded-full bg-fuchsia-500/20 border border-fuchsia-500/50 text-xs font-semibold text-fuchsia-600 dark:text-fuchsia-400">
-                                ✨ OMNI EDITING
+                                ✨ CONVERSATIONAL EDITING
                             </span>
                         </div>
                     </div>
@@ -829,7 +736,7 @@ export default function VideosPage() {
                                 <CardHeader>
                                     <CardTitle>Text to Video</CardTitle>
                                     <CardDescription>
-                                        Describe a scene and Veo 3.1 will generate an 8-second video with native audio
+                                        Describe a scene and Omni will generate a 3–10s video with native audio
                                     </CardDescription>
                                 </CardHeader>
                                 <CardContent className="space-y-4">
@@ -848,8 +755,6 @@ export default function VideosPage() {
                                     </div>
 
                                     <VideoConfigPanel
-                                        model={txtModel}
-                                        onModelChange={setTxtModel}
                                         aspectRatio={txtAspect}
                                         onAspectRatioChange={setTxtAspect}
                                         resolution={txtRes}
@@ -922,8 +827,6 @@ export default function VideosPage() {
                                     </div>
 
                                     <VideoConfigPanel
-                                        model={img2vModel}
-                                        onModelChange={setImg2vModel}
                                         aspectRatio={img2vAspect}
                                         onAspectRatioChange={setImg2vAspect}
                                         resolution={img2vRes}
@@ -974,7 +877,7 @@ export default function VideosPage() {
                                 <CardHeader>
                                     <CardTitle>Reference Images</CardTitle>
                                     <CardDescription>
-                                        Provide up to 3 asset images — Veo preserves the subjects&apos; appearance in the output
+                                        Provide up to 3 reference images — Omni draws on them as your prompt directs
                                     </CardDescription>
                                 </CardHeader>
                                 <CardContent className="space-y-4">
@@ -1001,8 +904,6 @@ export default function VideosPage() {
                                     </div>
 
                                     <VideoConfigPanel
-                                        model={refModel}
-                                        onModelChange={setRefModel}
                                         aspectRatio={refAspect}
                                         onAspectRatioChange={setRefAspect}
                                         resolution={refRes}
@@ -1013,7 +914,7 @@ export default function VideosPage() {
 
                                     <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-3">
                                         <p className="text-xs text-amber-700 dark:text-amber-400">
-                                            Veo 3.1 only — reference images require the duration to be 8s.
+                                            Omni decides how to use each reference image, so say in the prompt what role it should play.
                                         </p>
                                     </div>
 
@@ -1063,7 +964,7 @@ export default function VideosPage() {
                                 <CardHeader>
                                     <CardTitle>First &amp; Last Frame Interpolation</CardTitle>
                                     <CardDescription>
-                                        Define the opening and closing frames — Veo generates the journey between them
+                                        Define the opening and closing frames — Omni generates the journey between them
                                     </CardDescription>
                                 </CardHeader>
                                 <CardContent className="space-y-4">
@@ -1083,7 +984,7 @@ export default function VideosPage() {
                                     <div className="space-y-2">
                                         <label className="text-sm font-medium">Scene Prompt (optional)</label>
                                         <Textarea
-                                            placeholder="Describe the transition or leave blank to let Veo decide…"
+                                            placeholder="Describe the transition or leave blank to let Omni decide…"
                                             value={interpPrompt}
                                             onChange={(e) => setInterpPrompt(e.target.value)}
                                             rows={3}
@@ -1091,54 +992,14 @@ export default function VideosPage() {
                                         />
                                     </div>
 
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-2">
-                                            <label className="text-sm font-medium">Model</label>
-                                            <Select value={interpModel} onValueChange={setInterpModel}>
-                                                <SelectTrigger>
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="veo-3.1-generate-preview">Veo 3.1</SelectItem>
-                                                    <SelectItem value="veo-3.1-fast-generate-preview">Veo 3.1 Fast</SelectItem>
-                                                    <SelectItem value="veo-3.1-lite-generate-preview">Veo 3.1 Lite</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                        <div className="space-y-2">
-                                            <label className="text-sm font-medium">Aspect Ratio</label>
-                                            <Select value={interpAspect} onValueChange={setInterpAspect}>
-                                                <SelectTrigger>
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="16:9">16:9 (Landscape)</SelectItem>
-                                                    <SelectItem value="9:16">9:16 (Portrait)</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-2">
-                                            <label className="text-sm font-medium">Resolution</label>
-                                            <Select value={interpRes} onValueChange={setInterpRes}>
-                                                <SelectTrigger>
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="720p">720p</SelectItem>
-                                                    <SelectItem value="1080p">1080p</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                        <div className="space-y-2">
-                                            <label className="text-sm font-medium">Duration</label>
-                                            <div className="flex h-10 items-center rounded-md border border-zinc-200 dark:border-zinc-800 bg-transparent px-3 text-sm text-zinc-500">
-                                                8 seconds (fixed)
-                                            </div>
-                                        </div>
-                                    </div>
+                                    <VideoConfigPanel
+                                        aspectRatio={interpAspect}
+                                        onAspectRatioChange={setInterpAspect}
+                                        resolution={interpRes}
+                                        onResolutionChange={setInterpRes}
+                                        durationSeconds={interpDur}
+                                        onDurationChange={setInterpDur}
+                                    />
 
                                     <Button
                                         onClick={handleInterp}
@@ -1182,12 +1043,16 @@ export default function VideosPage() {
                                 <CardHeader>
                                     <CardTitle>Extend Video</CardTitle>
                                     <CardDescription>
-                                        Continue a Veo-generated video by up to 7 seconds — up to 20 times total
+                                        Generate a seamless 3–10s continuation at the tail of a clip — chain it to keep going
                                     </CardDescription>
                                 </CardHeader>
                                 <CardContent className="space-y-4">
                                     <VideoDropZone
-                                        label="Veo-Generated Video *"
+                                        label={
+                                            extGen.interactionId && !extVideo
+                                                ? "Source Video (optional — continuing the last result)"
+                                                : "Source Video *"
+                                        }
                                         value={extVideo}
                                         onChange={setExtVideo}
                                     />
@@ -1203,49 +1068,35 @@ export default function VideosPage() {
                                         />
                                     </div>
 
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-2">
-                                            <label className="text-sm font-medium">Model</label>
-                                            <Select value={extModel} onValueChange={setExtModel}>
-                                                <SelectTrigger>
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="veo-3.1-generate-preview">Veo 3.1</SelectItem>
-                                                    <SelectItem value="veo-3.1-fast-generate-preview">Veo 3.1 Fast</SelectItem>
-                                                    <SelectItem value="veo-3.0-generate-001">Veo 3.0 (Stable)</SelectItem>
-                                                    <SelectItem value="veo-3.0-fast-generate-001">Veo 3.0 Fast</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                        <div className="space-y-2">
-                                            <label className="text-sm font-medium">Aspect Ratio</label>
-                                            <Select value={extAspect} onValueChange={setExtAspect}>
-                                                <SelectTrigger>
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="16:9">16:9 (Landscape)</SelectItem>
-                                                    <SelectItem value="9:16">9:16 (Portrait)</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                    </div>
+                                    <VideoConfigPanel
+                                        aspectRatio={extAspect}
+                                        onAspectRatioChange={setExtAspect}
+                                        resolution={extRes}
+                                        onResolutionChange={setExtRes}
+                                        durationSeconds={extDur}
+                                        onDurationChange={setExtDur}
+                                    />
 
                                     <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-3 space-y-1">
                                         <p className="text-xs text-amber-700 dark:text-amber-400 font-medium">
-                                            Extension requirements
+                                            Extension notes
                                         </p>
                                         <ul className="text-xs text-amber-700/80 dark:text-amber-400/80 space-y-0.5 list-disc list-inside">
-                                            <li>Veo-generated videos only (not available for Veo 3.1 Lite)</li>
-                                            <li>720p resolution, 141s or less, 16:9 or 9:16</li>
-                                            <li>Video must have been generated or extended in the last 2 days</li>
+                                            <li>
+                                                Any uploaded clip works, up to {OMNI_MAX_INPUT_VIDEO_SECONDS}s
+                                                — it need not have been generated here
+                                            </li>
+                                            <li>Each pass adds 3–10s; run it again to keep extending</li>
+                                            <li>
+                                                Video-to-video is region-restricted (unavailable in the EEA, UK,
+                                                Switzerland and some US states)
+                                            </li>
                                         </ul>
                                     </div>
 
                                     <Button
                                         onClick={handleExtend}
-                                        disabled={extGen.isLoading || !extVideo}
+                                        disabled={extGen.isLoading || (!extVideo && !extGen.interactionId)}
                                         className="w-full pulse-glow"
                                     >
                                         {extGen.isLoading ? (
@@ -1322,7 +1173,7 @@ export default function VideosPage() {
                                         </p>
                                     </div>
 
-                                    <div className="grid grid-cols-2 gap-4">
+                                    <div className="grid grid-cols-3 gap-4">
                                         <div className="space-y-2">
                                             <label className="text-sm font-medium">Aspect Ratio</label>
                                             <Select value={omniAspect} onValueChange={setOmniAspect}>
@@ -1336,6 +1187,21 @@ export default function VideosPage() {
                                             </Select>
                                         </div>
                                         <div className="space-y-2">
+                                            <label className="text-sm font-medium">Resolution</label>
+                                            <Select value={omniRes} onValueChange={setOmniRes}>
+                                                <SelectTrigger>
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    {OMNI_RESOLUTIONS.map((r) => (
+                                                        <SelectItem key={r} value={r}>
+                                                            {RESOLUTION_LABELS[r] ?? r.toUpperCase()}
+                                                        </SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                        <div className="space-y-2">
                                             <label className="text-sm font-medium">Duration</label>
                                             <Select value={omniDuration} onValueChange={setOmniDuration}>
                                                 <SelectTrigger>
@@ -1343,10 +1209,11 @@ export default function VideosPage() {
                                                 </SelectTrigger>
                                                 <SelectContent>
                                                     <SelectItem value="none">Auto (model decides)</SelectItem>
-                                                    <SelectItem value="3">3 seconds</SelectItem>
-                                                    <SelectItem value="5">5 seconds</SelectItem>
-                                                    <SelectItem value="8">8 seconds</SelectItem>
-                                                    <SelectItem value="10">10 seconds</SelectItem>
+                                                    {OMNI_DURATIONS.map((d) => (
+                                                        <SelectItem key={d} value={d}>
+                                                            {d} seconds
+                                                        </SelectItem>
+                                                    ))}
                                                 </SelectContent>
                                             </Select>
                                         </div>
@@ -1356,7 +1223,7 @@ export default function VideosPage() {
                                         <p className="text-xs text-amber-700 dark:text-amber-400">
                                             Uploading a video to edit is region-restricted — unavailable
                                             in the EEA, UK, Switzerland, and some US states. Source clips
-                                            should be ≤10s at 720p / 24fps for best results.
+                                            should be ≤{OMNI_MAX_INPUT_VIDEO_SECONDS}s for best results.
                                         </p>
                                     </div>
 
@@ -1426,16 +1293,16 @@ export default function VideosPage() {
                 {/* Info footer */}
                 <div className="mt-8 rounded-xl glass-card border border-zinc-200/50 dark:border-zinc-800/50 p-6">
                     <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-3">
-                        About Veo 3.1
+                        About Gemini Omni Flash
                     </h3>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs text-zinc-500 dark:text-zinc-400">
                         <div>
                             <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-1">Resolution</p>
-                            <p>720p · 1080p · 4K</p>
+                            <p>360p · 720p · 1080p · 4K (1080p and 4K upscaled)</p>
                         </div>
                         <div>
                             <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-1">Duration</p>
-                            <p>4s · 6s · 8s @ 24fps</p>
+                            <p>3–10s @ 24fps</p>
                         </div>
                         <div>
                             <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-1">Audio</p>
@@ -1443,7 +1310,7 @@ export default function VideosPage() {
                         </div>
                         <div>
                             <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-1">Latency</p>
-                            <p>~30s – 6 min depending on load</p>
+                            <p>~30s – 3 min depending on load</p>
                         </div>
                     </div>
                 </div>
