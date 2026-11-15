@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useCallback } from "react"
+import { useState, useRef, useCallback, useEffect, useMemo } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -12,7 +12,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select"
-import { Loader2, Video, Download, Upload, X, Plus } from "lucide-react"
+import { Loader2, Video, Download, Upload, X, Plus, Wand2 } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { apiKeyHeader } from "@/lib/api-key"
 import {
@@ -145,6 +145,13 @@ async function pollInteraction(
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || "Poll failed")
     if (!data.done) return null
+    // Never hand an empty payload to <video>: it renders a player that plays
+    // nothing, which looks like a successful generation that produced no video.
+    if (typeof data.videoBase64 !== "string" || data.videoBase64.length < 256) {
+        throw new Error(
+            "The generation finished but returned no usable video data. Check the server log for the Omni response shape.",
+        )
+    }
     return {
         videoBase64: data.videoBase64,
         mimeType: data.mimeType,
@@ -152,12 +159,15 @@ async function pollInteraction(
     }
 }
 
-function downloadVideo(base64: string, mimeType: string, filename: string) {
+function videoBlob(base64: string, mimeType: string): Blob {
     const byteStr = atob(base64)
     const arr = new Uint8Array(byteStr.length)
     for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i)
-    const blob = new Blob([arr], { type: mimeType })
-    const url = URL.createObjectURL(blob)
+    return new Blob([arr], { type: mimeType })
+}
+
+function downloadVideo(base64: string, mimeType: string, filename: string) {
+    const url = URL.createObjectURL(videoBlob(base64, mimeType))
     const a = document.createElement("a")
     a.href = url
     a.download = filename
@@ -393,6 +403,10 @@ function VideoOutput({
     error,
     tabKey,
     latencyHint = "Gemini Omni Flash typically takes 30s–3 min",
+    turns = [],
+    activeTurn = 0,
+    onSelectTurn,
+    onRefine,
 }: {
     result: VideoResult | null
     isLoading: boolean
@@ -400,17 +414,45 @@ function VideoOutput({
     error: string | null
     tabKey: string
     latencyHint?: string
+    turns?: VideoTurn[]
+    activeTurn?: number
+    onSelectTurn?: (index: number) => void
+    onRefine?: (prompt: string) => void
 }) {
-    const videoSrc = result
-        ? `data:${result.mimeType};base64,${result.videoBase64}`
-        : null
+    const [refinePrompt, setRefinePrompt] = useState("")
+
+    // An object URL, not a data: URL. A multi-megabyte MP4 generally will not
+    // play from a data: URI — the browser cannot range-request it, so a file
+    // whose moov atom sits at the end never starts and the player just sits
+    // there blank with no error. Object URLs are seekable.
+    const videoSrc = useMemo(
+        () =>
+            result
+                ? URL.createObjectURL(videoBlob(result.videoBase64, result.mimeType))
+                : null,
+        [result],
+    )
+    useEffect(() => {
+        if (!videoSrc) return
+        return () => URL.revokeObjectURL(videoSrc)
+    }, [videoSrc])
+
+    const handleRefine = () => {
+        if (!refinePrompt.trim()) return
+        onRefine?.(refinePrompt)
+        setRefinePrompt("")
+    }
 
     return (
         <Card className="h-full">
             <CardHeader>
                 <CardTitle>Generated Video</CardTitle>
                 <CardDescription>
-                    {result ? "Video ready — click to play" : "Video will appear here"}
+                    {result
+                        ? turns.length > 1
+                          ? `Turn ${activeTurn + 1} of ${turns.length} — edit it again below`
+                          : "Video ready — click to play"
+                        : "Video will appear here"}
                 </CardDescription>
             </CardHeader>
             <CardContent>
@@ -443,27 +485,88 @@ function VideoOutput({
                     </div>
                 )}
 
-                {videoSrc && !isLoading && (
+                {/* The clip stays on screen while an edit renders, so the
+                    turn-by-turn loop keeps its continuity. */}
+                {videoSrc && (
                     <div className="space-y-3">
                         <video
-                            key={`${tabKey}-${result?.videoBase64.slice(0, 20)}`}
+                            key={videoSrc}
                             src={videoSrc}
                             controls
                             autoPlay
                             loop
                             className="w-full rounded-lg border border-zinc-200/50 dark:border-zinc-800/50"
                         />
+
+                        {turns.length > 1 && onSelectTurn && (
+                            <div className="space-y-1">
+                                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                                    Edit history — pick a turn to view it, or to branch a new
+                                    edit from it
+                                </p>
+                                <div className="flex flex-wrap gap-1">
+                                    {turns.map((turn, i) => (
+                                        <Button
+                                            key={turn.interactionId}
+                                            variant={i === activeTurn ? "default" : "outline"}
+                                            size="sm"
+                                            className="h-7 max-w-[14rem] truncate px-2 text-xs"
+                                            title={turn.label}
+                                            disabled={isLoading}
+                                            onClick={() => onSelectTurn(i)}
+                                        >
+                                            {i + 1}. {turn.label}
+                                        </Button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
                         <Button
                             variant="outline"
                             size="sm"
                             className="w-full"
                             onClick={() =>
-                                downloadVideo(result!.videoBase64, result!.mimeType, `omni-${tabKey}.mp4`)
+                                downloadVideo(
+                                    result!.videoBase64,
+                                    result!.mimeType,
+                                    turns.length > 1
+                                        ? `omni-${tabKey}-turn${activeTurn + 1}.mp4`
+                                        : `omni-${tabKey}.mp4`,
+                                )
                             }
                         >
                             <Download className="mr-2 h-4 w-4" />
                             Download Video
                         </Button>
+
+                        {/* Conversational editing: continues the selected turn
+                            via previous_interaction_id — no re-upload, and the
+                            model keeps whatever the prompt does not mention. */}
+                        {onRefine && !isLoading && (
+                            <div className="space-y-2 rounded-lg border border-fuchsia-500/30 bg-fuchsia-500/5 p-3">
+                                <label className="text-sm font-medium">
+                                    Edit this clip
+                                </label>
+                                <Textarea
+                                    placeholder={`Simple instructions work best, e.g. "Make it snow" or "Change the car to red". Omni keeps everything you don't mention.`}
+                                    value={refinePrompt}
+                                    onChange={(e) => setRefinePrompt(e.target.value)}
+                                    rows={2}
+                                    className="resize-none"
+                                />
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="w-full"
+                                    onClick={handleRefine}
+                                    disabled={!refinePrompt.trim()}
+                                >
+                                    <Wand2 className="mr-2 h-4 w-4" />
+                                    Apply Edit
+                                </Button>
+                            </div>
+                        )}
                     </div>
                 )}
             </CardContent>
@@ -474,64 +577,127 @@ function VideoOutput({
 // ─── Polling hook ─────────────────────────────────────────────────────────────
 
 // Every tab runs the same Omni interaction: start a background job, then poll.
-// The interactionId is threaded back out so any result can be refined or
-// extended turn-by-turn without re-uploading the source.
+//
+// Results accumulate as a chain of turns rather than a single video, because
+// Omni editing is stateful: passing previous_interaction_id continues the
+// conversation, so each turn can be refined without re-uploading anything.
+// Selecting an earlier turn and refining from it branches the chain there.
+interface VideoTurn {
+    result: VideoResult
+    interactionId: string
+    /** Short label for the turn strip — the prompt that produced it. */
+    label: string
+}
+
 function useVideoGeneration() {
     const [isLoading, setIsLoading] = useState(false)
     const [statusMsg, setStatusMsg] = useState("")
-    const [result, setResult] = useState<VideoResult | null>(null)
-    const [interactionId, setInteractionId] = useState<string | null>(null)
     const [error, setError] = useState<string | null>(null)
+    // Turns and the selected index move together, so they share one state slot.
+    const [chain, setChain] = useState<{ turns: VideoTurn[]; active: number }>({
+        turns: [],
+        active: 0,
+    })
 
-    const generate = useCallback(async (payload: Record<string, unknown>) => {
-        setIsLoading(true)
-        setError(null)
-        setResult(null)
-        const hasVideo = Boolean(payload.video)
-        const isRefine = Boolean(payload.previousInteractionId)
-        setStatusMsg(
-            isRefine
-                ? "Submitting refinement to Omni…"
-                : hasVideo
-                  ? "Uploading source video & submitting to Omni…"
-                  : "Submitting to Omni…",
-        )
+    const run = useCallback(
+        async (payload: Record<string, unknown>, isRefine: boolean) => {
+            setIsLoading(true)
+            setError(null)
+            // A fresh generation clears the chain; a refine keeps it on screen.
+            if (!isRefine) setChain({ turns: [], active: 0 })
 
-        try {
-            const id = await startGeneration(payload)
-            setInteractionId(id)
-            setStatusMsg("Generation started — polling for completion…")
+            const hasVideo = Boolean(payload.video)
+            setStatusMsg(
+                isRefine
+                    ? "Submitting edit to Omni…"
+                    : hasVideo
+                      ? "Uploading source video & submitting to Omni…"
+                      : "Submitting to Omni…",
+            )
 
-            let attempts = 0
-            const maxAttempts = 72 // 72 × 10s = 12 min ceiling
+            try {
+                const id = await startGeneration(payload)
+                setStatusMsg("Generation started — polling for completion…")
 
-            const poll = async (): Promise<void> => {
-                if (attempts >= maxAttempts) {
-                    throw new Error("Timed out waiting for video generation")
+                let attempts = 0
+                const maxAttempts = 72 // 72 × 10s = 12 min ceiling
+
+                const poll = async (): Promise<
+                    VideoResult & { interactionId: string }
+                > => {
+                    if (attempts >= maxAttempts) {
+                        throw new Error("Timed out waiting for video generation")
+                    }
+                    attempts++
+                    setStatusMsg(`Waiting… (${attempts * 10}s elapsed)`)
+
+                    const out = await pollInteraction(id)
+                    if (out) return out
+                    await new Promise((r) => setTimeout(r, 10000))
+                    return poll()
                 }
-                attempts++
-                setStatusMsg(`Waiting… (${attempts * 10}s elapsed)`)
 
-                const out = await pollInteraction(id)
-                if (out) {
-                    setResult({ videoBase64: out.videoBase64, mimeType: out.mimeType })
-                    setInteractionId(out.interactionId)
-                    return
+                const out = await poll()
+                const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : ""
+                const turn: VideoTurn = {
+                    result: { videoBase64: out.videoBase64, mimeType: out.mimeType },
+                    interactionId: out.interactionId,
+                    label: prompt || (isRefine ? "Edit" : "Clip"),
                 }
-                await new Promise((r) => setTimeout(r, 10000))
-                return poll()
+                setChain((prev) => {
+                    // A refine branches from the selected turn, so anything
+                    // after it is replaced rather than kept.
+                    const base = isRefine ? prev.turns.slice(0, prev.active + 1) : []
+                    const turns = [...base, turn]
+                    return { turns, active: turns.length - 1 }
+                })
+            } catch (err: unknown) {
+                setError(err instanceof Error ? err.message : "Generation failed")
+            } finally {
+                setIsLoading(false)
+                setStatusMsg("")
             }
+        },
+        [],
+    )
 
-            await poll()
-        } catch (err: unknown) {
-            setError(err instanceof Error ? err.message : "Generation failed")
-        } finally {
-            setIsLoading(false)
-            setStatusMsg("")
-        }
+    const generate = useCallback(
+        (payload: Record<string, unknown>) =>
+            run(payload, Boolean(payload.previousInteractionId)),
+        [run],
+    )
+
+    const current = chain.turns[chain.active] ?? null
+
+    // Continues the selected turn. Only the prompt is sent: aspect ratio,
+    // resolution and duration carry over from the interaction being continued.
+    const refine = useCallback(
+        (prompt: string) => {
+            const from = chain.turns[chain.active]
+            if (!from || !prompt.trim()) return
+            return run({ prompt: prompt.trim(), previousInteractionId: from.interactionId }, true)
+        },
+        [chain, run],
+    )
+
+    const selectTurn = useCallback((index: number) => {
+        setChain((prev) =>
+            index >= 0 && index < prev.turns.length ? { ...prev, active: index } : prev,
+        )
     }, [])
 
-    return { isLoading, statusMsg, result, interactionId, error, generate }
+    return {
+        isLoading,
+        statusMsg,
+        error,
+        generate,
+        refine,
+        selectTurn,
+        result: current?.result ?? null,
+        interactionId: current?.interactionId ?? null,
+        turns: chain.turns,
+        activeTurn: chain.active,
+    }
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -585,7 +751,6 @@ export default function VideosPage() {
     const [omniAspect, setOmniAspect] = useState("16:9")
     const [omniRes, setOmniRes] = useState("720p")
     const [omniDuration, setOmniDuration] = useState("none")
-    const [omniRefinePrompt, setOmniRefinePrompt] = useState("")
     const omniGen = useVideoGeneration()
 
     // ── Handlers ──
@@ -648,6 +813,9 @@ export default function VideosPage() {
             aspectRatio: extAspect,
             resolution: extRes,
             durationSeconds: extDur,
+            // Omni infers the mode from the prompt, but an uploaded clip plus
+            // text is ambiguous between extend and edit, so name the task.
+            task: "extend",
             ...(extVideo
                 ? { video: { base64: extVideo.base64, mimeType: extVideo.mimeType } }
                 : { previousInteractionId: extGen.interactionId }),
@@ -661,20 +829,15 @@ export default function VideosPage() {
             aspectRatio: omniAspect,
             resolution: omniRes,
             ...(omniDuration !== "none" ? { durationSeconds: omniDuration } : {}),
-            ...(omniVideo ? { video: { base64: omniVideo.base64, mimeType: omniVideo.mimeType } } : {}),
+            // With a source clip this is an edit; without one it is plain
+            // text-to-video, which the model infers perfectly well on its own.
+            ...(omniVideo
+                ? {
+                      task: "edit",
+                      video: { base64: omniVideo.base64, mimeType: omniVideo.mimeType },
+                  }
+                : {}),
         })
-    }
-
-    const handleOmniRefine = () => {
-        if (!omniRefinePrompt.trim() || !omniGen.interactionId) return
-        omniGen.generate({
-            prompt: omniRefinePrompt,
-            aspectRatio: omniAspect,
-            resolution: omniRes,
-            ...(omniDuration !== "none" ? { durationSeconds: omniDuration } : {}),
-            previousInteractionId: omniGen.interactionId,
-        })
-        setOmniRefinePrompt("")
     }
 
     const updateRefImage = (
@@ -699,7 +862,8 @@ export default function VideosPage() {
                             🎬 Video Generation
                         </h1>
                         <p className="text-lg text-zinc-700 dark:text-zinc-300">
-                            Generate, edit and extend 3–10s videos with Gemini Omni Flash
+                            Generate, edit and extend 3–10s videos with Gemini Omni Flash —
+                            every result can be edited again, turn by turn
                         </p>
                         <div className="flex items-center gap-2 mt-3 flex-wrap">
                             <span className="px-3 py-1 rounded-full bg-indigo-500/20 border border-indigo-500/50 text-xs font-semibold text-indigo-600 dark:text-indigo-400">
@@ -794,6 +958,10 @@ export default function VideosPage() {
                                 statusMsg={txtGen.statusMsg}
                                 error={txtGen.error}
                                 tabKey="text"
+                                turns={txtGen.turns}
+                                activeTurn={txtGen.activeTurn}
+                                onSelectTurn={txtGen.selectTurn}
+                                onRefine={txtGen.refine}
                             />
                         </div>
                     </TabsContent>
@@ -866,6 +1034,10 @@ export default function VideosPage() {
                                 statusMsg={img2vGen.statusMsg}
                                 error={img2vGen.error}
                                 tabKey="image"
+                                turns={img2vGen.turns}
+                                activeTurn={img2vGen.activeTurn}
+                                onSelectTurn={img2vGen.selectTurn}
+                                onRefine={img2vGen.refine}
                             />
                         </div>
                     </TabsContent>
@@ -953,6 +1125,10 @@ export default function VideosPage() {
                                 statusMsg={refGen.statusMsg}
                                 error={refGen.error}
                                 tabKey="reference"
+                                turns={refGen.turns}
+                                activeTurn={refGen.activeTurn}
+                                onSelectTurn={refGen.selectTurn}
+                                onRefine={refGen.refine}
                             />
                         </div>
                     </TabsContent>
@@ -1032,6 +1208,10 @@ export default function VideosPage() {
                                 statusMsg={interpGen.statusMsg}
                                 error={interpGen.error}
                                 tabKey="interpolation"
+                                turns={interpGen.turns}
+                                activeTurn={interpGen.activeTurn}
+                                onSelectTurn={interpGen.selectTurn}
+                                onRefine={interpGen.refine}
                             />
                         </div>
                     </TabsContent>
@@ -1125,6 +1305,10 @@ export default function VideosPage() {
                                 statusMsg={extGen.statusMsg}
                                 error={extGen.error}
                                 tabKey="extend"
+                                turns={extGen.turns}
+                                activeTurn={extGen.activeTurn}
+                                onSelectTurn={extGen.selectTurn}
+                                onRefine={extGen.refine}
                             />
                         </div>
                     </TabsContent>
@@ -1245,32 +1429,6 @@ export default function VideosPage() {
                                         )}
                                     </Button>
 
-                                    {/* Turn-by-turn refinement — appears once we have a result */}
-                                    {omniGen.interactionId && omniGen.result && (
-                                        <div className="space-y-2 rounded-lg border border-fuchsia-500/30 bg-fuchsia-500/5 p-3">
-                                            <label className="text-sm font-medium">
-                                                Refine this result (turn-by-turn)
-                                            </label>
-                                            <Textarea
-                                                placeholder={`e.g. "Change the setting to a snowy winter wonderland." — continues from the last result, no re-upload needed.`}
-                                                value={omniRefinePrompt}
-                                                onChange={(e) => setOmniRefinePrompt(e.target.value)}
-                                                rows={2}
-                                                className="resize-none"
-                                            />
-                                            <Button
-                                                variant="outline"
-                                                size="sm"
-                                                className="w-full"
-                                                onClick={handleOmniRefine}
-                                                disabled={omniGen.isLoading || !omniRefinePrompt.trim()}
-                                            >
-                                                <Plus className="mr-2 h-4 w-4" />
-                                                Refine
-                                            </Button>
-                                        </div>
-                                    )}
-
                                     {omniGen.error && (
                                         <div className="rounded-lg bg-red-500/20 border border-red-500/30 p-4">
                                             <p className="text-sm text-red-900 dark:text-red-100">{omniGen.error}</p>
@@ -1284,6 +1442,10 @@ export default function VideosPage() {
                                 statusMsg={omniGen.statusMsg}
                                 error={omniGen.error}
                                 tabKey="omni"
+                                turns={omniGen.turns}
+                                activeTurn={omniGen.activeTurn}
+                                onSelectTurn={omniGen.selectTurn}
+                                onRefine={omniGen.refine}
                                 latencyHint="Omni Flash typically takes 30s–3 min"
                             />
                         </div>

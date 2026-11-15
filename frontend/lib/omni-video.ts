@@ -17,6 +17,8 @@ import {
     OMNI_VIDEO_MODEL,
     OMNI_MIN_DURATION,
     OMNI_MAX_DURATION,
+    OMNI_VIDEO_TASKS,
+    type OmniVideoTask,
 } from "@/lib/omni-video-options"
 
 export * from "@/lib/omni-video-options"
@@ -42,6 +44,18 @@ export interface OmniVideoRequest {
     video?: OmniMedia
     /** A prior interaction to continue, for turn-by-turn refinement. */
     previousInteractionId?: string
+    /**
+     * Optional explicit mode hint. Omitted, Omni infers the mode from the
+     * prompt and inputs, which is what Google recommends.
+     */
+    task?: OmniVideoTask
+}
+
+/** Narrows an untrusted body value to a task the API actually accepts. */
+export function parseOmniTask(value: unknown): OmniVideoTask | undefined {
+    return OMNI_VIDEO_TASKS.includes(value as OmniVideoTask)
+        ? (value as OmniVideoTask)
+        : undefined
 }
 
 export interface OmniVideoResult {
@@ -147,6 +161,9 @@ export async function startOmniVideo(
         ...(req.previousInteractionId
             ? { previous_interaction_id: req.previousInteractionId }
             : {}),
+        ...(req.task
+            ? { generation_config: { video_config: { task: req.task } } }
+            : {}),
     })
 
     if (!interaction?.id) {
@@ -169,9 +186,10 @@ export async function pollOmniVideo(
     const status: string | undefined = interaction?.status
 
     if (status === "failed" || status === "cancelled") {
-        throw new OmniInteractionError(
-            interaction?.error?.message || `Omni interaction ${status}`,
-        )
+        // Failures arrive as `errors: [{code, message}]`; older shapes used `error`.
+        const err = interaction?.errors?.[0] ?? interaction?.error
+        const detail = [err?.code, err?.message].filter(Boolean).join(": ")
+        throw new OmniInteractionError(detail || `Omni interaction ${status}`)
     }
     if (status !== "completed") return null
 
@@ -191,13 +209,23 @@ export async function pollOmniVideo(
         )
     }
 
-    // A completed interaction usually carries the bytes inline, even when it was
-    // created with uri delivery.
+    // One line per completed generation, so a malformed payload is diagnosable
+    // from the server log without reproducing it.
+    console.log("Omni interaction completed:", {
+        id: interaction.id,
+        videoFields: Object.keys(videoOut),
+        uri: videoOut.uri ?? null,
+    })
+
+    // A completed interaction sometimes carries the bytes inline even when it
+    // was created with uri delivery.
     const inline = videoOut.data ?? videoOut.videoBytes
     if (inline) {
+        const videoBase64 =
+            typeof inline === "string" ? inline : Buffer.from(inline).toString("base64")
+        assertLooksLikeVideo(Buffer.from(videoBase64, "base64"), "inline data")
         return {
-            videoBase64:
-                typeof inline === "string" ? inline : Buffer.from(inline).toString("base64"),
+            videoBase64,
             mimeType: videoOut.mime_type || videoOut.mimeType || "video/mp4",
             interactionId: interaction.id,
         }
@@ -208,19 +236,74 @@ export async function pollOmniVideo(
         throw new OmniInteractionError("No video uri or data in the Omni response")
     }
 
-    const sep = uri.includes("?") ? "&" : "?"
-    const dlRes = await fetch(`${uri}${sep}alt=media`, {
-        headers: { "x-goog-api-key": apiKey },
-    })
+    // URI delivery hands back a file that may not be finalized the instant the
+    // interaction reports completed. Rather than trust the Files API state
+    // enum, just attempt the download and judge the bytes: a real video ends
+    // the poll, a not-yet-ready response returns null so the client's existing
+    // loop tries again, and only a hard HTTP failure throws.
+    //
+    // The uri already carries its own query string (`:download?alt=media`), so
+    // it is fetched verbatim.
+    const dlRes = await fetch(uri, { headers: { "x-goog-api-key": apiKey } })
+
     if (!dlRes.ok) {
+        const body = await dlRes.text()
+        // These mean "ask again shortly"; everything else is a real failure
+        // worth surfacing rather than hiding behind a spinner.
+        if (RETRYABLE_DOWNLOAD_STATUSES.has(dlRes.status) || dlRes.status >= 500) {
+            console.warn(
+                `Omni video not downloadable yet (HTTP ${dlRes.status}), will retry:`,
+                body.slice(0, 200),
+            )
+            return null
+        }
         throw new OmniInteractionError(
-            `Failed to download the Omni video: ${dlRes.status} ${await dlRes.text()}`,
+            `Failed to download the Omni video: ${dlRes.status} ${body.slice(0, 500)}`,
         )
     }
 
+    const bytes = Buffer.from(await dlRes.arrayBuffer())
+    const contentType = dlRes.headers.get("content-type") || ""
+
+    if (!looksLikeVideo(bytes)) {
+        // A 200 that isn't video means the file is still being finalized.
+        console.warn(
+            `Omni video not ready yet: ${bytes.length} bytes, content-type ` +
+                `${contentType || "none"}: ${bytes.toString("utf8").slice(0, 200)}`,
+        )
+        return null
+    }
+
     return {
-        videoBase64: Buffer.from(await dlRes.arrayBuffer()).toString("base64"),
-        mimeType: dlRes.headers.get("content-type") || "video/mp4",
+        videoBase64: bytes.toString("base64"),
+        mimeType: contentType.startsWith("video/") ? contentType : "video/mp4",
         interactionId: interaction.id,
+    }
+}
+
+/** Download failures that just mean the generated file isn't finalized yet. */
+const RETRYABLE_DOWNLOAD_STATUSES = new Set([404, 409, 425, 429])
+
+/**
+ * Whether a payload is plausibly a video file.
+ *
+ * MP4/MOV carry an "ftyp" box in the first few bytes; WebM starts with the
+ * EBML magic number. Anything else — an empty body, a JSON error, an HTML
+ * page — would otherwise be base64'd straight into a `<video src="data:...">`
+ * and render as a player that silently plays nothing.
+ */
+function looksLikeVideo(bytes: Buffer): boolean {
+    if (bytes.length < 1024) return false
+    if (bytes.subarray(0, 64).includes("ftyp")) return true
+    return bytes.subarray(0, 4).toString("hex") === "1a45dfa3"
+}
+
+/** The same check for the inline path, where there is nothing to retry. */
+function assertLooksLikeVideo(bytes: Buffer, source: string): void {
+    if (!looksLikeVideo(bytes)) {
+        throw new OmniInteractionError(
+            `Omni returned ${bytes.length} bytes from ${source} that are not a ` +
+                `recognizable video: ${bytes.toString("utf8").slice(0, 200)}`,
+        )
     }
 }

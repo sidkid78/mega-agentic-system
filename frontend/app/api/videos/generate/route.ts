@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { geminiClient, missingKeyResponse } from "@/lib/server-gemini"
-import { startOmniVideo, type OmniMedia } from "@/lib/omni-video"
+import { startOmniVideo, parseOmniTask, type OmniMedia } from "@/lib/omni-video"
 
 // Image uploads happen here (bounded), but the multi-minute generation is
 // offloaded to a background interaction, so this stays well under serverless
@@ -49,6 +49,7 @@ export async function POST(req: NextRequest) {
             images?: OmniMedia[]
             video?: OmniMedia
             previousInteractionId?: string
+            task?: string
         }
 
         const {
@@ -61,6 +62,10 @@ export async function POST(req: NextRequest) {
             video,
             previousInteractionId,
         } = body
+
+        // An unrecognized task is dropped rather than rejected: the model
+        // infers the mode perfectly well without it.
+        const task = parseOmniTask(body.task)
 
         // A refinement turn needs only a prompt; a first turn needs a prompt or media.
         if (!prompt?.trim() && images.length === 0 && !video) {
@@ -80,6 +85,7 @@ export async function POST(req: NextRequest) {
                 images,
                 video,
                 previousInteractionId,
+                task,
             }),
         )
 

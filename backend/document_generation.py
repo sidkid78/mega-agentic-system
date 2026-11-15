@@ -45,7 +45,7 @@ def generate_document_content(
     style: Literal["technical", "casual", "formal", "academic", "creative"] = "formal",
     target_audience: str = "general",
     include_citations: bool = False,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> str:
     """
     Generate document content using AI based on a topic.
@@ -111,7 +111,7 @@ def generate_document_structured(
     client: genai.Client,
     topic: str,
     num_sections: int = 5,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> DocumentStructure:
     """
     Generate a structured document with explicit sections.
@@ -122,7 +122,7 @@ def generate_document_structured(
         client (genai.Client): An initialized Gemini API client
         topic (str): The topic for the document
         num_sections (int, optional): Number of main sections. Defaults to 5.
-        model (str, optional): Model to use. Defaults to "gemini-3.5-flash".
+        model (str, optional): Model to use. Defaults to "gemini-3.8-flash".
     
     Returns:
         DocumentStructure: Structured document data
@@ -150,7 +150,6 @@ Format the output as structured JSON."""
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=DocumentStructure,
-            temperature=0.5
         )
     )
     
@@ -162,7 +161,7 @@ def expand_document(
     content: str,
     expansion_factor: float = 1.5,
     focus_areas: Optional[List[str]] = None,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> str:
     """
     Expand existing document content with more detail.
@@ -211,7 +210,7 @@ def summarize_document(
     client: genai.Client,
     content: str,
     length: Literal["brief", "moderate", "detailed"] = "moderate",
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> str:
     """
     Generate a summary of document content.
@@ -242,8 +241,7 @@ Capture the main points and key takeaways."""
 
     response = gemini_generate(client, label="document",
         model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.3)
+        contents=prompt
     )
     
     return response.text
@@ -252,7 +250,7 @@ Capture the main points and key takeaways."""
 def analyze_document(
     client: genai.Client,
     content: str,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> DocumentAnalysis:
     """
     Analyze document quality and provide insights.
@@ -288,7 +286,6 @@ Provide:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=DocumentAnalysis,
-            temperature=0.2
         )
     )
     
@@ -300,7 +297,7 @@ def translate_document(
     content: str,
     target_language: str,
     preserve_formatting: bool = True,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> str:
     """
     Translate document content to another language.
@@ -329,8 +326,7 @@ Maintain the document's tone and style."""
 
     response = gemini_generate(client, label="document",
         model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.3)
+        contents=prompt
     )
     
     return response.text
@@ -340,7 +336,7 @@ def improve_document(
     client: genai.Client,
     content: str,
     improvements: List[str],
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> str:
     """
     Improve document based on specific criteria.
@@ -375,7 +371,6 @@ Provide the improved version while maintaining the overall structure and message
     response = gemini_generate(client, label="document",
         model=model,
         contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.5)
     )
     
     return response.text
@@ -385,7 +380,7 @@ def generate_with_research(
     client: genai.Client,
     topic: str,
     use_grounding: bool = True,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> str:
     """
     Generate document with web research for accuracy.
@@ -416,7 +411,6 @@ Use current, factual information. Include:
 Format in markdown with proper headings."""
 
     config = types.GenerateContentConfig(
-        temperature=0.4,
     )
     
     # Add Google Search grounding if requested

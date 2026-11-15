@@ -1,7 +1,20 @@
 import { NextRequest, NextResponse } from "next/server"
 import { geminiClient, missingKeyResponse } from "@/lib/server-gemini"
+import {
+    NANO_BANANA_MODEL,
+    supportsImageSearch,
+    supportsSearchGrounding,
+    supportsThinkingLevel,
+    supportsVideoInput,
+} from "@/lib/image-models"
+import type { ImageBlock, OutputBlock } from "@/lib/image-models"
 
 export const maxDuration = 60
+
+interface InputImage {
+    base64: string
+    mimeType: string
+}
 
 export async function POST(req: NextRequest) {
     try {
@@ -10,80 +23,110 @@ export async function POST(req: NextRequest) {
 
         const {
             prompt,
-            model = "gemini-3.1-flash-image-preview",
-            images = [],        // [{ base64, mimeType }] — for edit / reference modes
-            aspectRatio = "1:1",
-            imageSize,          // "512" | "1K" | "2K" | "4K" — Gemini 3 models only
+            model = NANO_BANANA_MODEL,
+            images = [],            // [{ base64, mimeType }] — for edit / reference modes
+            videoUrl,               // public YouTube URL — video-to-image
+            aspectRatio,            // omit to keep the shape of the input / previous image
+            imageSize,              // "1K" | "2K" | "4K"
             useSearchGrounding = false,
-            thinkingLevel,      // "minimal" | "high" — 3.1 Flash only
+            useImageSearch = false, // Google Image Search as visual context
+            thinkingLevel,          // "minimal" | "high" — not sent for Pro
             includeText = false,
+            previousInteractionId,  // continue an earlier turn (multi-turn editing)
         } = await req.json()
 
-        // ── Build content parts ──────────────────────────────────────────────
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const parts: any[] = [{ text: prompt || " " }]
-        for (const img of images as Array<{ base64: string; mimeType: string }>) {
-            parts.push({ inlineData: { data: img.base64, mimeType: img.mimeType } })
+        // ── Build input ─────────────────────────────────────────────────────
+        const inputImages = images as InputImage[]
+        const hasVideo = Boolean(videoUrl) && supportsVideoInput(model)
+        const text = prompt || " "
+        const input =
+            inputImages.length === 0 && !hasVideo
+                ? text
+                : [
+                      ...(hasVideo
+                          ? [{ type: "video", uri: videoUrl, mime_type: "video/mp4" }]
+                          : []),
+                      { type: "text", text },
+                      ...inputImages.map((img) => ({
+                          type: "image",
+                          data: img.base64,
+                          mime_type: img.mimeType,
+                      })),
+                  ]
+
+        // ── Output format ───────────────────────────────────────────────────
+        const imageFormat = {
+            type: "image",
+            ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+            ...(imageSize ? { image_size: imageSize } : {}),
         }
 
-        // ── Build config ────────────────────────────────────────────────────
-        const isGemini25 = (model as string).startsWith("gemini-2.5")
-        const isGemini31Flash = model === "gemini-3.1-flash-image-preview"
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const config: any = {
-            responseModalities: includeText ? ["TEXT", "IMAGE"] : ["IMAGE"],
-        }
-
-        // Aspect ratio (all models) + image size (Gemini 3 only)
-        if (isGemini25) {
-            config.responseFormat = { image: { aspectRatio } }
-        } else {
-            config.responseFormat = {
-                image: {
-                    aspectRatio,
-                    ...(imageSize ? { imageSize } : {}),
-                },
-            }
-        }
-
-        // Google Search grounding
-        if (useSearchGrounding) {
-            config.tools = [{ googleSearch: {} }]
-        }
-
-        // Thinking level (Gemini 3.1 Flash Image only)
-        if (isGemini31Flash && thinkingLevel) {
-            config.thinkingConfig = { thinkingLevel }
-        }
+        // ── Grounding ───────────────────────────────────────────────────────
+        const searchTypes = [
+            ...(useSearchGrounding && supportsSearchGrounding(model) ? ["web_search"] : []),
+            ...(useImageSearch && supportsImageSearch(model) ? ["image_search"] : []),
+        ]
 
         // ── Call API ────────────────────────────────────────────────────────
-        const response = await ai.models.generateContent({
+        // The SDK's types lag the Interactions API, as in lib/omni-video.ts.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const interaction: any = await (ai as any).interactions.create({
             model,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            contents: [{ role: "user", parts }] as any,
-            config,
+            input,
+            // An image-only format drops the model's commentary; a list keeps it.
+            response_format: includeText ? [{ type: "text" }, imageFormat] : imageFormat,
+            ...(searchTypes.length > 0
+                ? { tools: [{ type: "google_search", search_types: searchTypes }] }
+                : {}),
+            ...(thinkingLevel && supportsThinkingLevel(model)
+                ? { generation_config: { thinking_level: thinkingLevel } }
+                : {}),
+            ...(previousInteractionId
+                ? { previous_interaction_id: previousInteractionId }
+                : {}),
         })
 
         // ── Extract results ──────────────────────────────────────────────────
-        const resultImages: Array<{ base64: string; mimeType: string }> = []
-        let resultText = ""
+        // Blocks keep the model's order, so interleaved text and images (Pro)
+        // read as written. Thoughts are their own step type and are skipped.
+        const blocks: OutputBlock[] = []
+        const searchSuggestions = new Set<string>()
+        let usedSearch = false
 
-        for (const part of response.candidates?.[0]?.content?.parts ?? []) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const p = part as any
-            if (p.thought) continue          // skip internal thought images
-            if (p.text) {
-                resultText += p.text
-            } else if (p.inlineData) {
-                resultImages.push({
-                    base64: p.inlineData.data,
-                    mimeType: p.inlineData.mimeType ?? "image/png",
-                })
+        for (const step of interaction?.steps ?? []) {
+            if (step?.type === "google_search_call") {
+                usedSearch = true
+            } else if (step?.type === "google_search_result") {
+                // Google's terms require showing these when Search grounding is used.
+                for (const result of step.result ?? []) {
+                    if (result?.search_suggestions) searchSuggestions.add(result.search_suggestions)
+                }
+            } else if (step?.type === "model_output") {
+                for (const block of step.content ?? []) {
+                    if (block?.type === "text" && block.text) {
+                        blocks.push({ type: "text", text: block.text })
+                    } else if (block?.type === "image" && block.data) {
+                        blocks.push({
+                            type: "image",
+                            base64: block.data,
+                            mimeType: block.mime_type ?? "image/png",
+                        })
+                    }
+                }
             }
         }
 
-        return NextResponse.json({ images: resultImages, text: resultText })
+        const resultImages = blocks.filter((b): b is ImageBlock => b.type === "image")
+
+        return NextResponse.json({
+            blocks,
+            images: resultImages.map(({ base64, mimeType }) => ({ base64, mimeType })),
+            text: blocks.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n\n"),
+            interactionId: interaction?.id ?? null,
+            // A turn that ran Search cannot be continued by id (see the page's refine flow).
+            usedSearch,
+            searchSuggestions: [...searchSuggestions],
+        })
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Image generation failed"
         console.error("[nano-banana]", err)

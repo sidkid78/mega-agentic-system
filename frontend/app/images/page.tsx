@@ -15,6 +15,19 @@ import {
 } from "@/components/ui/select"
 import { apiClient } from "@/lib/api"
 import { apiKeyHeader } from "@/lib/api-key"
+import {
+  IMAGE_MODEL_OPTIONS,
+  MAX_REFERENCE_IMAGES,
+  NANO_BANANA_MODEL,
+  NANO_BANANA_PRO_MODEL,
+  imageAspectRatios,
+  imageSizes,
+  supportsImageSearch,
+  supportsSearchGrounding,
+  supportsThinkingLevel,
+  supportsVideoInput,
+} from "@/lib/image-models"
+import type { ImageBlock, OutputBlock } from "@/lib/image-models"
 import { Loader2, Image as ImageIcon, Download } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { ImageUploader } from "@/components/ImageUploader"
@@ -23,8 +36,9 @@ export default function ImagesPage() {
   // Generate Tab State
   const [prompt, setPrompt] = useState("")
   const [aspectRatio, setAspectRatio] = useState("1:1")
-  const [model, setModel] = useState("imagen-4.0-fast-generate-001")
+  const [model, setModel] = useState<string>(NANO_BANANA_MODEL)
   const [numberOfImages, setNumberOfImages] = useState(1)
+  const [imageSize, setImageSize] = useState("1K")
   const [negativePrompt, setNegativePrompt] = useState("")
 
   // Edit Tab State
@@ -41,8 +55,9 @@ export default function ImagesPage() {
   // Batch Tab State
   const [batchPrompts, setBatchPrompts] = useState("")
   const [batchAspectRatio, setBatchAspectRatio] = useState("1:1")
-  const [batchModel, setBatchModel] = useState("imagen-4.0-fast-generate-001")
+  const [batchModel, setBatchModel] = useState<string>(NANO_BANANA_MODEL)
   const [batchImagesPerPrompt, setBatchImagesPerPrompt] = useState(1)
+  const [batchImageSize, setBatchImageSize] = useState("1K")
 
   // Common State
   const [loading, setLoading] = useState(false)
@@ -50,9 +65,9 @@ export default function ImagesPage() {
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState("generate")
 
-  // ── Nano Banana (Gemini 3 native image gen) state ──────────────────────
-  const [nbMode, setNbMode] = useState<"generate" | "edit" | "reference">("generate")
-  const [nbModel, setNbModel] = useState("gemini-3.1-flash-image-preview")
+  // ── Nano Banana (advanced controls) state ──────────────────────
+  const [nbMode, setNbMode] = useState<"generate" | "edit" | "reference" | "video">("generate")
+  const [nbModel, setNbModel] = useState<string>(NANO_BANANA_MODEL)
   const [nbPrompt, setNbPrompt] = useState("")
   const [nbAspectRatio, setNbAspectRatio] = useState("1:1")
   const [nbImageSize, setNbImageSize] = useState("1K")
@@ -60,10 +75,18 @@ export default function ImagesPage() {
   const [nbThinkingLevel, setNbThinkingLevel] = useState("minimal")
   const [nbIncludeText, setNbIncludeText] = useState(false)
   const [nbEditImage, setNbEditImage] = useState("")
-  const [nbRefImages, setNbRefImages] = useState<string[]>(["", "", "", "", ""])
+  const [nbRefImages, setNbRefImages] = useState<string[]>([])
   const [nbLoading, setNbLoading] = useState(false)
-  const [nbImages, setNbImages] = useState<Array<{ base64: string; mimeType: string }>>([])
-  const [nbText, setNbText] = useState("")
+  const [nbVideoUrl, setNbVideoUrl] = useState("")
+  const [nbImageSearch, setNbImageSearch] = useState(false)
+  // Output blocks keep the model's order, so Pro's interleaved text and images read as written.
+  const [nbBlocks, setNbBlocks] = useState<OutputBlock[]>([])
+  const [nbSuggestions, setNbSuggestions] = useState<string[]>([])
+  // Multi-turn editing: the interaction to continue from, and how many turns deep we are.
+  const [nbInteractionId, setNbInteractionId] = useState<string | null>(null)
+  const [nbChainable, setNbChainable] = useState(true)
+  const [nbTurn, setNbTurn] = useState(0)
+  const [nbRefinePrompt, setNbRefinePrompt] = useState("")
   const [nbError, setNbError] = useState<string | null>(null)
 
   const handleGenerate = async () => {
@@ -79,6 +102,7 @@ export default function ImagesPage() {
         aspect_ratio: aspectRatio,
         model,
         number_of_images: numberOfImages,
+        image_size: imageSize,
         negative_prompt: negativePrompt || undefined,
       })
 
@@ -149,6 +173,7 @@ export default function ImagesPage() {
         aspect_ratio: batchAspectRatio,
         model: batchModel,
         number_of_images: batchImagesPerPrompt,
+        image_size: batchImageSize,
       })
 
       // Flatten all batch results into a single array
@@ -176,57 +201,85 @@ export default function ImagesPage() {
   }
 
   // ── Nano Banana helpers ────────────────────────────────────────────────
-  const stripDataUrl = (s: string) => (s.includes(",") ? s.split(",")[1] : s)
+  /** Split an uploader data URL into the raw base64 and its real MIME type. */
+  const toInputImage = (dataUrl: string) => {
+    const match = /^data:([^;]+);base64,(.*)$/.exec(dataUrl)
+    return match
+      ? { base64: match[2], mimeType: match[1] }
+      : { base64: dataUrl, mimeType: "image/png" }
+  }
 
-  const nbAspectRatioList =
-    nbModel === "gemini-3.1-flash-image-preview"
-      ? ["1:1","1:4","1:8","2:3","3:2","3:4","4:1","4:3","4:5","5:4","8:1","9:16","16:9","21:9"]
-      : ["1:1","2:3","3:2","3:4","4:3","4:5","5:4","9:16","16:9","21:9"]
+  const nbAspectRatioList = imageAspectRatios(nbModel)
+  const nbImageSizeList = imageSizes(nbModel)
+  const nbHasThinkingLevel = supportsThinkingLevel(nbModel)
+  const nbHasSearchGrounding = supportsSearchGrounding(nbModel)
+  const nbHasImageSearch = supportsImageSearch(nbModel)
+  const nbHasVideoInput = supportsVideoInput(nbModel)
+  const nbImages = nbBlocks.filter((b): b is ImageBlock => b.type === "image")
+  const nbLastImage = nbImages[nbImages.length - 1]
 
-  const nbImageSizeList =
-    nbModel === "gemini-3.1-flash-image-preview"
-      ? ["512","1K","2K","4K"]
-      : nbModel === "gemini-3-pro-image-preview"
-      ? ["1K","2K","4K"]
-      : null // gemini-2.5 has no imageSize option
+  const handleNbReset = () => {
+    setNbBlocks([])
+    setNbSuggestions([])
+    setNbInteractionId(null)
+    setNbChainable(true)
+    setNbTurn(0)
+    setNbRefinePrompt("")
+    setNbError(null)
+  }
 
-  const handleNanoBanana = async () => {
-    if (!nbPrompt.trim()) return
+  /** Runs a fresh generation, or (isRefine) the next turn on the current result. */
+  const runNanoBanana = async (isRefine: boolean) => {
+    const promptText = isRefine ? nbRefinePrompt : nbPrompt
+    if (!promptText.trim()) return
     setNbLoading(true)
     setNbError(null)
-    setNbImages([])
-    setNbText("")
+    if (!isRefine) handleNbReset()
 
     try {
       const imgs: Array<{ base64: string; mimeType: string }> = []
-      if (nbMode === "edit" && nbEditImage) {
-        imgs.push({ base64: stripDataUrl(nbEditImage), mimeType: "image/png" })
-      } else if (nbMode === "reference") {
-        for (const img of nbRefImages) {
-          if (img) imgs.push({ base64: stripDataUrl(img), mimeType: "image/png" })
+      let previousInteractionId: string | undefined
+      if (isRefine) {
+        // Continue the conversation by id so earlier turns stay in context. The API
+        // refuses to chain onto a turn that ran Search, so that case resends the image.
+        if (nbInteractionId && nbChainable) {
+          previousInteractionId = nbInteractionId
+        } else if (nbLastImage) {
+          imgs.push({ base64: nbLastImage.base64, mimeType: nbLastImage.mimeType })
         }
+      } else if (nbMode === "edit" && nbEditImage) {
+        imgs.push(toInputImage(nbEditImage))
+      } else if (nbMode === "reference") {
+        for (const img of nbRefImages) imgs.push(toInputImage(img))
       }
 
-      const isGemini25 = nbModel.startsWith("gemini-2.5")
       const res = await fetch("/api/images/nano-banana", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...apiKeyHeader() },
         body: JSON.stringify({
-          prompt: nbPrompt,
+          prompt: promptText,
           model: nbModel,
           images: imgs,
-          aspectRatio: nbAspectRatio,
-          imageSize: isGemini25 ? undefined : nbImageSize,
-          useSearchGrounding: nbSearchGrounding,
-          thinkingLevel:
-            nbModel === "gemini-3.1-flash-image-preview" ? nbThinkingLevel : undefined,
+          videoUrl:
+            !isRefine && nbMode === "video" && nbHasVideoInput ? nbVideoUrl.trim() : undefined,
+          // A refine keeps the shape of the image it is editing.
+          aspectRatio: isRefine ? undefined : nbAspectRatio,
+          imageSize: nbImageSize,
+          useSearchGrounding: nbHasSearchGrounding && nbSearchGrounding,
+          useImageSearch: nbHasImageSearch && nbImageSearch,
+          thinkingLevel: nbHasThinkingLevel ? nbThinkingLevel : undefined,
           includeText: nbIncludeText,
+          previousInteractionId,
         }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Generation failed")
-      setNbImages(data.images ?? [])
-      setNbText(data.text ?? "")
+      setNbBlocks(data.blocks ?? [])
+      setNbSuggestions(data.searchSuggestions ?? [])
+      setNbInteractionId(data.interactionId ?? null)
+      setNbChainable(!data.usedSearch)
+      setNbTurn((turn) => (isRefine ? turn + 1 : 1))
+      if (isRefine) setNbRefinePrompt("")
     } catch (err: unknown) {
       setNbError(err instanceof Error ? err.message : "Generation failed")
     } finally {
@@ -237,7 +290,7 @@ export default function ImagesPage() {
   const handleNbDownload = (base64: string, mimeType: string, idx: number) => {
     const link = document.createElement("a")
     link.href = `data:${mimeType};base64,${base64}`
-    link.download = `nano-banana-${idx + 1}.png`
+    link.download = `nano-banana-${idx + 1}.${mimeType === "image/jpeg" ? "jpg" : "png"}`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -318,11 +371,9 @@ export default function ImagesPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="1:1">1:1 (Square)</SelectItem>
-                          <SelectItem value="3:4">3:4 (Portrait)</SelectItem>
-                          <SelectItem value="4:3">4:3 (Landscape)</SelectItem>
-                          <SelectItem value="9:16">9:16 (Tall)</SelectItem>
-                          <SelectItem value="16:9">16:9 (Wide)</SelectItem>
+                          {imageAspectRatios(model).map((r) => (
+                            <SelectItem key={r} value={r}>{r}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
@@ -331,17 +382,33 @@ export default function ImagesPage() {
                       <label htmlFor="model" className="text-sm font-medium">
                         Model
                       </label>
-                      <Select value={model} onValueChange={setModel}>
+                      <Select value={model} onValueChange={(v) => { setModel(v); setAspectRatio("1:1"); setImageSize("1K") }}>
                         <SelectTrigger id="model">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="imagen-4.0-fast-generate-001">Fast (Recommended)</SelectItem>
-                          <SelectItem value="imagen-4.0-generate-001">Standard</SelectItem>
-                          <SelectItem value="imagen-4.0-ultra-generate-001">Ultra (1 image only)</SelectItem>
+                          {IMAGE_MODEL_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label htmlFor="image-size" className="text-sm font-medium">
+                      Resolution
+                    </label>
+                    <Select value={imageSize} onValueChange={setImageSize}>
+                      <SelectTrigger id="image-size">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {imageSizes(model).map((size) => (
+                          <SelectItem key={size} value={size}>{size}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
 
                   <div className="space-y-2">
@@ -352,7 +419,7 @@ export default function ImagesPage() {
                       id="number-of-images"
                       type="number"
                       min="1"
-                      max={model === "imagen-4.0-ultra-generate-001" ? "1" : "4"}
+                      max="4"
                       value={numberOfImages}
                       onChange={(e) => setNumberOfImages(parseInt(e.target.value) || 1)}
                     />
@@ -728,11 +795,9 @@ export default function ImagesPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="1:1">1:1 (Square)</SelectItem>
-                          <SelectItem value="3:4">3:4 (Portrait)</SelectItem>
-                          <SelectItem value="4:3">4:3 (Landscape)</SelectItem>
-                          <SelectItem value="9:16">9:16 (Tall)</SelectItem>
-                          <SelectItem value="16:9">16:9 (Wide)</SelectItem>
+                          {imageAspectRatios(batchModel).map((r) => (
+                            <SelectItem key={r} value={r}>{r}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
@@ -741,16 +806,33 @@ export default function ImagesPage() {
                       <label htmlFor="batch-model" className="text-sm font-medium">
                         Model
                       </label>
-                      <Select value={batchModel} onValueChange={setBatchModel}>
+                      <Select value={batchModel} onValueChange={(v) => { setBatchModel(v); setBatchAspectRatio("1:1"); setBatchImageSize("1K") }}>
                         <SelectTrigger id="batch-model">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="imagen-4.0-fast-generate-001">Fast (Recommended)</SelectItem>
-                          <SelectItem value="imagen-4.0-generate-001">Standard</SelectItem>
+                          {IMAGE_MODEL_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label htmlFor="batch-image-size" className="text-sm font-medium">
+                      Resolution
+                    </label>
+                    <Select value={batchImageSize} onValueChange={setBatchImageSize}>
+                      <SelectTrigger id="batch-image-size">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {imageSizes(batchModel).map((size) => (
+                          <SelectItem key={size} value={size}>{size}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
 
                   <div className="space-y-2">
@@ -850,7 +932,7 @@ export default function ImagesPage() {
               {/* ── Left: Controls ── */}
               <Card>
                 <CardHeader>
-                  <CardTitle>Nano Banana — Gemini 3 Image Generation</CardTitle>
+                  <CardTitle>Nano Banana — Advanced Image Generation</CardTitle>
                   <CardDescription>
                     Native Gemini image generation with thinking, grounding, and up to 4K output
                   </CardDescription>
@@ -861,7 +943,7 @@ export default function ImagesPage() {
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Mode</label>
                     <div className="flex gap-2 flex-wrap">
-                      {(["generate", "edit", "reference"] as const).map((m) => (
+                      {(["generate", "edit", "reference", "video"] as const).map((m) => (
                         <button
                           key={m}
                           onClick={() => setNbMode(m)}
@@ -871,7 +953,7 @@ export default function ImagesPage() {
                               : "border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:border-indigo-400"
                           }`}
                         >
-                          {m === "generate" ? "✨ Generate" : m === "edit" ? "✏️ Edit Image" : "🖼️ Multi-Reference"}
+                          {m === "generate" ? "✨ Generate" : m === "edit" ? "✏️ Edit Image" : m === "reference" ? "🖼️ Multi-Reference" : "🎬 From Video"}
                         </button>
                       ))}
                     </div>
@@ -885,15 +967,9 @@ export default function ImagesPage() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="gemini-3.1-flash-image-preview">
-                          Nano Banana 2 — Gemini 3.1 Flash Image (Recommended)
-                        </SelectItem>
-                        <SelectItem value="gemini-3-pro-image-preview">
-                          Nano Banana Pro — Gemini 3 Pro Image (Professional)
-                        </SelectItem>
-                        <SelectItem value="gemini-2.5-flash-image">
-                          Nano Banana — Gemini 2.5 Flash Image (Fast)
-                        </SelectItem>
+                        {IMAGE_MODEL_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
@@ -911,19 +987,43 @@ export default function ImagesPage() {
                   {nbMode === "reference" && (
                     <div className="space-y-2">
                       <label className="text-sm font-medium">
-                        Reference Images (up to {nbModel === "gemini-3.1-flash-image-preview" ? "10 objects + 4 characters" : "5 characters + 6 objects"})
+                        Reference Images ({nbRefImages.length}/{MAX_REFERENCE_IMAGES}: up to {nbModel === NANO_BANANA_PRO_MODEL ? "6 objects, 5 characters, 3 styles" : "10 objects, 4 characters"})
                       </label>
                       <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
-                        {nbRefImages.map((img, idx) => (
+                        {(nbRefImages.length < MAX_REFERENCE_IMAGES ? [...nbRefImages, ""] : nbRefImages).map((img, idx) => (
                           <div key={idx} className="space-y-1">
                             <ImageUploader
-                              onImageSelect={(v) => setNbRefImages((prev) => { const next = [...prev]; next[idx] = v; return next })}
+                              onImageSelect={(v) =>
+                                setNbRefImages((prev) =>
+                                  v
+                                    ? [...prev.slice(0, idx), v, ...prev.slice(idx + 1)]
+                                    : prev.filter((_, i) => i !== idx)
+                                )
+                              }
                               currentImage={img}
                               label={`Ref ${idx + 1}`}
                             />
                           </div>
                         ))}
                       </div>
+                    </div>
+                  )}
+
+                  {/* Video-to-image */}
+                  {nbMode === "video" && (
+                    <div className="space-y-2">
+                      <label htmlFor="nb-video-url" className="text-sm font-medium">YouTube URL *</label>
+                      <Input
+                        id="nb-video-url"
+                        placeholder="https://www.youtube.com/watch?v=..."
+                        value={nbVideoUrl}
+                        onChange={(e) => setNbVideoUrl(e.target.value)}
+                      />
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        {nbHasVideoInput
+                          ? "The model watches the video and uses it as context. Try a poster, thumbnail or summary infographic."
+                          : "Video input is not available on Nano Banana Pro."}
+                      </p>
                     </div>
                   )}
 
@@ -963,32 +1063,23 @@ export default function ImagesPage() {
                       </Select>
                     </div>
 
-                    {nbImageSizeList ? (
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">Resolution</label>
-                        <Select value={nbImageSize} onValueChange={setNbImageSize}>
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {nbImageSizeList.map((s) => (
-                              <SelectItem key={s} value={s}>{s}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium">Resolution</label>
-                        <div className="flex h-10 items-center rounded-md border border-zinc-200 dark:border-zinc-800 px-3 text-sm text-zinc-500">
-                          1K (fixed for 2.5 Flash)
-                        </div>
-                      </div>
-                    )}
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Resolution</label>
+                      <Select value={nbImageSize} onValueChange={setNbImageSize}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {nbImageSizeList.map((s) => (
+                            <SelectItem key={s} value={s}>{s}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
 
-                  {/* Thinking level (3.1 Flash only) */}
-                  {nbModel === "gemini-3.1-flash-image-preview" && (
+                  {/* Thinking level (not offered for Pro) */}
+                  {nbHasThinkingLevel && (
                     <div className="space-y-2">
                       <label className="text-sm font-medium">Thinking Level</label>
                       <Select value={nbThinkingLevel} onValueChange={setNbThinkingLevel}>
@@ -1008,10 +1099,11 @@ export default function ImagesPage() {
 
                   {/* Toggles */}
                   <div className="flex flex-col gap-3">
-                    <label className="flex items-center gap-3 cursor-pointer">
+                    <label className={`flex items-center gap-3 ${nbHasSearchGrounding ? "cursor-pointer" : "opacity-50"}`}>
                       <input
                         type="checkbox"
-                        checked={nbSearchGrounding}
+                        checked={nbHasSearchGrounding && nbSearchGrounding}
+                        disabled={!nbHasSearchGrounding}
                         onChange={(e) => setNbSearchGrounding(e.target.checked)}
                         className="w-4 h-4 accent-indigo-500"
                       />
@@ -1019,6 +1111,21 @@ export default function ImagesPage() {
                         <span className="font-medium">Google Search Grounding</span>
                         <span className="text-zinc-500 dark:text-zinc-400 ml-1">
                           — generate from real-time data (news, weather, etc.)
+                        </span>
+                      </span>
+                    </label>
+                    <label className={`flex items-center gap-3 ${nbHasImageSearch ? "cursor-pointer" : "opacity-50"}`}>
+                      <input
+                        type="checkbox"
+                        checked={nbHasImageSearch && nbImageSearch}
+                        disabled={!nbHasImageSearch}
+                        onChange={(e) => setNbImageSearch(e.target.checked)}
+                        className="w-4 h-4 accent-indigo-500"
+                      />
+                      <span className="text-sm">
+                        <span className="font-medium">Google Image Search</span>
+                        <span className="text-zinc-500 dark:text-zinc-400 ml-1">
+                          (Nano Banana 2.1) use real web images as visual reference
                         </span>
                       </span>
                     </label>
@@ -1039,11 +1146,12 @@ export default function ImagesPage() {
                   </div>
 
                   <Button
-                    onClick={handleNanoBanana}
+                    onClick={() => runNanoBanana(false)}
                     disabled={
                       nbLoading ||
                       !nbPrompt.trim() ||
-                      (nbMode === "edit" && !nbEditImage)
+                      (nbMode === "edit" && !nbEditImage) ||
+                      (nbMode === "video" && (!nbVideoUrl.trim() || !nbHasVideoInput))
                     }
                     className="w-full pulse-glow"
                   >
@@ -1092,40 +1200,89 @@ export default function ImagesPage() {
                     <div className="flex flex-col items-center justify-center py-12 gap-3">
                       <Loader2 className="h-8 w-8 text-indigo-500 animate-spin" />
                       <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                        {nbThinkingLevel === "high" && nbModel === "gemini-3.1-flash-image-preview"
+                        {nbThinkingLevel === "high" && nbHasThinkingLevel
                           ? "Thinking deeply… this may take a moment"
                           : "Generating…"}
                       </p>
                     </div>
                   )}
 
-                  {nbImages.map((img, idx) => (
-                    <div
-                      key={idx}
-                      className="relative rounded-lg overflow-hidden border border-zinc-200/50 dark:border-zinc-800/50"
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={`data:${img.mimeType};base64,${img.base64}`}
-                        alt={`Nano Banana output ${idx + 1}`}
-                        className="w-full h-auto"
-                      />
-                      <div className="absolute top-2 right-2">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => handleNbDownload(img.base64, img.mimeType, idx)}
-                          className="glass-card"
-                        >
-                          <Download className="h-4 w-4" />
-                        </Button>
+                  {nbBlocks.map((block, idx) =>
+                    block.type === "text" ? (
+                      <div
+                        key={idx}
+                        className="rounded-lg bg-zinc-100 dark:bg-zinc-800/50 p-4 text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap"
+                      >
+                        {block.text}
                       </div>
-                    </div>
+                    ) : (
+                      <div
+                        key={idx}
+                        className="relative rounded-lg overflow-hidden border border-zinc-200/50 dark:border-zinc-800/50"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={`data:${block.mimeType};base64,${block.base64}`}
+                          alt={`Nano Banana output ${idx + 1}`}
+                          className="w-full h-auto"
+                        />
+                        <div className="absolute top-2 right-2">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => handleNbDownload(block.base64, block.mimeType, idx)}
+                            className="glass-card"
+                          >
+                            <Download className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    )
+                  )}
+
+                  {/* Google requires these to be shown when Search grounding was used.
+                      They are Google-supplied HTML, so they render in a sandboxed frame. */}
+                  {nbSuggestions.map((html, idx) => (
+                    <iframe
+                      key={idx}
+                      title="Google Search suggestions"
+                      sandbox="allow-popups allow-popups-to-escape-sandbox"
+                      srcDoc={html}
+                      className="w-full h-14 rounded-lg border-0"
+                    />
                   ))}
 
-                  {nbText && (
-                    <div className="rounded-lg bg-zinc-100 dark:bg-zinc-800/50 p-4 text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap">
-                      {nbText}
+                  {/* Multi-turn editing */}
+                  {nbLastImage && !nbLoading && (
+                    <div className="space-y-2 rounded-lg border border-indigo-500/30 p-4">
+                      <label htmlFor="nb-refine" className="text-sm font-medium">
+                        Refine this result (turn {nbTurn})
+                      </label>
+                      <Textarea
+                        id="nb-refine"
+                        placeholder="Describe the next change, e.g. make it night, remove the boat, translate the text to Spanish"
+                        value={nbRefinePrompt}
+                        onChange={(e) => setNbRefinePrompt(e.target.value)}
+                        rows={2}
+                        className="resize-none"
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          onClick={() => runNanoBanana(true)}
+                          disabled={!nbRefinePrompt.trim()}
+                          className="flex-1"
+                        >
+                          Apply change
+                        </Button>
+                        <Button variant="outline" onClick={handleNbReset}>
+                          Start over
+                        </Button>
+                      </div>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        {nbChainable
+                          ? "Continues the same conversation, so earlier turns stay in context."
+                          : "The last turn used Search, so this sends the image back instead of continuing the conversation."}
+                      </p>
                     </div>
                   )}
                 </CardContent>
@@ -1137,16 +1294,16 @@ export default function ImagesPage() {
               <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-3">Model Comparison</h3>
               <div className="grid grid-cols-3 gap-4 text-xs text-zinc-500 dark:text-zinc-400">
                 <div>
-                  <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-1">🍌 Nano Banana 2 (3.1 Flash)</p>
-                  <p>Up to 4K · 14 ref images · Search + Image Search grounding · Thinking</p>
+                  <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-1">🍌 Nano Banana 2.1</p>
+                  <p>Up to 4K · 14 ref images · Search + Image Search · Video input · Multi-turn editing</p>
                 </div>
                 <div>
                   <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-1">🍌 Nano Banana Pro (3 Pro)</p>
-                  <p>Up to 4K · 14 ref images · Search grounding · Professional assets</p>
+                  <p>Up to 4K · 14 ref images · Search grounding · Interleaved text + images</p>
                 </div>
                 <div>
-                  <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-1">🍌 Nano Banana (2.5 Flash)</p>
-                  <p>1K fixed · 3 ref images · Fast &amp; cost-efficient</p>
+                  <p className="font-medium text-zinc-700 dark:text-zinc-300 mb-1">🍌 Nano Banana 2 Lite</p>
+                  <p>1K only · Video input · No Search · Fastest &amp; cheapest</p>
                 </div>
               </div>
             </div>

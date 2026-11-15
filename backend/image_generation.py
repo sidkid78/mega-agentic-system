@@ -1,182 +1,200 @@
-from PIL import Image 
-from io import BytesIO 
+"""
+Image generation and editing with the Nano Banana models.
+
+Everything here goes through the Interactions API (client.interactions.create),
+which needs google-genai >= 2.0.0. Imagen was shut down on the Gemini API on
+2026-08-17, so there is no generate_images path any more.
+"""
+import base64
+from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
+from typing import Any, Callable, Dict, List, Optional, Sequence
+
+from PIL import Image
 from google import genai
-from google.genai import types
-from typing import List, Optional, Literal
+
+
+# Nano Banana 2.1 - the current workhorse for generation and editing.
+DEFAULT_IMAGE_MODEL = "gemini-nano-banana-2.1"
+# Nano Banana Pro - slower, for complex instructions and high-fidelity text.
+PRO_IMAGE_MODEL = "gemini-3-pro-image"
+# Nano Banana 2 Lite - fastest and cheapest, 1K only; weak at multi-reference and multi-turn edits.
+LITE_IMAGE_MODEL = "gemini-3.1-flash-lite-image"
+
+# Nano Banana 2.1 takes all of these. Pro is not documented for the 1:4 / 4:1 / 1:8 / 8:1
+# panoramas; the API rejects a ratio the chosen model does not support.
+ASPECT_RATIOS = (
+    "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4",
+    "9:16", "16:9", "21:9", "1:4", "4:1", "1:8", "8:1",
+)
+IMAGE_SIZES = ("1K", "2K", "4K")
+MAX_IMAGES_PER_REQUEST = 4
+
+
+def _image_part(image: Image.Image) -> Dict[str, str]:
+    """Encode a PIL image as an Interactions API image input block."""
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return {
+        "type": "image",
+        "data": base64.b64encode(buffer.getvalue()).decode("utf-8"),
+        "mime_type": "image/png",
+    }
+
+
+def _images_from_interaction(interaction: Any) -> List[Image.Image]:
+    """Collect every image the model returned, in order."""
+    images: List[Image.Image] = []
+    for step in getattr(interaction, "steps", None) or []:
+        if getattr(step, "type", None) != "model_output":
+            continue
+        for block in getattr(step, "content", None) or []:
+            if getattr(block, "type", None) != "image" or not getattr(block, "data", None):
+                continue
+            image = Image.open(BytesIO(base64.b64decode(block.data)))
+            # Callers save these as JPEG, which cannot hold an alpha channel.
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            images.append(image)
+    return images
+
+
+def _validate(model: str, aspect_ratio: Optional[str], image_size: Optional[str], number_of_images: int) -> None:
+    if model.startswith("imagen-"):
+        raise ValueError(
+            f"{model} was shut down on 2026-08-17. Use {DEFAULT_IMAGE_MODEL}, "
+            f"{PRO_IMAGE_MODEL} or {LITE_IMAGE_MODEL} instead."
+        )
+    if aspect_ratio is not None and aspect_ratio not in ASPECT_RATIOS:
+        raise ValueError(f"aspect_ratio must be one of {list(ASPECT_RATIOS)}")
+    if image_size is not None and image_size not in IMAGE_SIZES:
+        raise ValueError(f"image_size must be one of {list(IMAGE_SIZES)}")
+    if model == LITE_IMAGE_MODEL and image_size not in (None, "1K"):
+        # The API answers this with a bare 404 "Requested entity was not found".
+        raise ValueError(f"{LITE_IMAGE_MODEL} only produces 1K images; use {DEFAULT_IMAGE_MODEL} for {image_size}")
+    if not 1 <= number_of_images <= MAX_IMAGES_PER_REQUEST:
+        raise ValueError(f"number_of_images must be between 1 and {MAX_IMAGES_PER_REQUEST}")
+
+
+def _run(
+    client: genai.Client,
+    model: str,
+    prompt: str,
+    images: Sequence[Image.Image] = (),
+    aspect_ratio: Optional[str] = None,
+    image_size: Optional[str] = None,
+    number_of_images: int = 1,
+) -> List[Image.Image]:
+    """Run one image request, repeated number_of_images times in parallel.
+
+    An interaction yields one image, so variations are separate calls.
+    """
+    _validate(model, aspect_ratio, image_size, number_of_images)
+
+    response_format: Dict[str, str] = {"type": "image"}
+    if aspect_ratio:
+        response_format["aspect_ratio"] = aspect_ratio
+    if image_size:
+        response_format["image_size"] = image_size
+
+    model_input: Any = prompt
+    if images:
+        model_input = [{"type": "text", "text": prompt}, *[_image_part(img) for img in images]]
+
+    def call(_: int) -> List[Image.Image]:
+        interaction = client.interactions.create(
+            model=model,
+            input=model_input,
+            response_format=response_format,
+        )
+        return _images_from_interaction(interaction)
+
+    results = _in_parallel(call, number_of_images)
+    generated = [image for batch in results for image in batch]
+    if not generated:
+        raise RuntimeError(f"{model} returned no image for this prompt")
+    return generated
+
+
+def _in_parallel(call: Callable[[int], List[Image.Image]], count: int) -> List[List[Image.Image]]:
+    if count == 1:
+        return [call(0)]
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        return list(pool.map(call, range(count)))
 
 
 def generate_image(
-    client: genai.Client, 
-    prompt: str, 
+    client: genai.Client,
+    prompt: str,
     aspect_ratio: str = "1:1",
-    model: str = "gemini-3.1-flash-image",
+    model: str = DEFAULT_IMAGE_MODEL,
     number_of_images: int = 1,
-    output_mime_type: str = "image/jpeg",
-    person_generation: str = "ALLOW_ADULT",
     negative_prompt: Optional[str] = None,
+    image_size: Optional[str] = None,
 ) -> List[Image.Image]:
     """
-    Generate images using Google's generative models (Gemini or Imagen).
-    
-    This function supports both the newer Gemini image models (via generate_content)
-    and the dedicated Imagen 4.0 models (via generate_images).
-    
+    Generate images from a text prompt.
+
     Args:
         client (genai.Client): An initialized Gemini API client
         prompt (str): A text description of the image to generate
-        aspect_ratio (str, optional): The aspect ratio ("1:1", "3:4", "4:3", "9:16", "16:9")
-        model (str, optional): The model to use. Options:
-            - "gemini-3.5-flash-image" (Fast, high quality - Nano Banana)
-            - "gemini-3-pro-image-preview" (Highest quality - Nano Banana Pro)
-            - "imagen-4.0-fast-generate-001" (Legacy Imagen)
-            - "imagen-4.0-ultra-generate-001" (Legacy Imagen Ultra)
-            Defaults to "gemini-3.1-flash-image-preview".
+        aspect_ratio (str, optional): One of ASPECT_RATIOS. Defaults to "1:1".
+        model (str, optional): DEFAULT_IMAGE_MODEL (Nano Banana 2.1),
+            PRO_IMAGE_MODEL or LITE_IMAGE_MODEL.
         number_of_images (int, optional): Number of images to generate (1-4).
-        output_mime_type (str, optional): "image/jpeg" or "image/png".
-        person_generation (str, optional): "ALLOW_ADULT", "ALLOW_ALL", "DONT_ALLOW".
-        negative_prompt (str, optional): Things to avoid in the generated image.
-    
+        negative_prompt (str, optional): Things to avoid. Nano Banana has no
+            negative-prompt field, so this is appended to the prompt.
+        image_size (str, optional): "1K", "2K" or "4K". The model default is 1K.
+
     Returns:
         List[Image.Image]: List of PIL Image objects
     """
-    # Validate parameters
-    valid_aspects = ["1:1", "3:4", "4:3", "9:16", "16:9"]
-    if aspect_ratio not in valid_aspects:
-        raise ValueError(f"aspect_ratio must be one of {valid_aspects}")
-    
-    if not 1 <= number_of_images <= 4:
-        raise ValueError("number_of_images must be between 1 and 4")
+    if negative_prompt:
+        prompt = f"{prompt}\n\nAvoid: {negative_prompt}"
 
-    try:
-        if model.startswith("gemini-"):
-            # Gemini use candidate_count and a specific image_config
-            config = {
-                'response_modalities': ['IMAGE'],
-                'candidate_count': number_of_images,
-                'image_config': {
-                    'aspect_ratio': aspect_ratio,
-                    'output_mime_type': output_mime_type,
-                }
-            }
-            # Note: person_generation might be handled differently or as a safety setting.
-            # For now, we omit it if it causes validation errors in image_config.
-            
-            if negative_prompt:
-                config['image_config']['negative_prompt'] = negative_prompt
-
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=config
-            )
-            
-            images = []
-            for candidate in response.candidates:
-                for part in candidate.content.parts:
-                    if part.inline_data:
-                        images.append(Image.open(BytesIO(part.inline_data.data)))
-            return images
-
-        # Fallback to legacy Imagen pattern
-        config = {
-            'number_of_images': number_of_images,
-            'aspect_ratio': aspect_ratio,
-            'output_mime_type': output_mime_type,
-            'person_generation': person_generation,
-        }
-        if negative_prompt:
-            config['negative_prompt'] = negative_prompt
-            
-        result = client.models.generate_images(
-            model=model,
-            prompt=prompt,
-            config=config
-        )
-        
-        images = []
-        for generated_image in result.generated_images:
-            images.append(Image.open(BytesIO(generated_image.image.image_bytes)))
-        return images
-    
-    except Exception as e:
-        print(f"Error generating images: {e}")
-        raise
-
-
-def upscale_image(
-    client: genai.Client,
-    image: Image.Image,
-    upscale_factor: Literal["x2", "x4"] = "x2",
-    output_mime_type: str = "image/jpeg"
-) -> Image.Image:
-    """
-    Upscale an image using Imagen's upscaling capability.
-    
-    Note: Only available in Vertex AI, not Gemini Developer API.
-    
-    Args:
-        client (genai.Client): An initialized Gemini API client (must be Vertex AI)
-        image (Image.Image): PIL Image to upscale
-        upscale_factor (str): Upscale factor - "x2" or "x4". Defaults to "x2".
-        output_mime_type (str): Output format. Defaults to "image/jpeg".
-    
-    Returns:
-        Image.Image: Upscaled PIL Image
-    
-    Example:
-        >>> original = generate_image(client, "A cat")[0]
-        >>> upscaled = upscale_image(client, original, upscale_factor="x4")
-        >>> upscaled.save("upscaled_cat.png")
-    """
-    result = client.models.upscale_image(
-        model='imagen-4.0-generate-001',
-        image=image,
-        upscale_factor=upscale_factor,
-        config=types.UpscaleImageConfig(
-            include_rai_reason=True,
-            output_mime_type=output_mime_type,
-        ),
+    return _run(
+        client,
+        model,
+        prompt,
+        aspect_ratio=aspect_ratio,
+        image_size=image_size,
+        number_of_images=number_of_images,
     )
-    
-    image_bytes = result.generated_images[0].image.image_bytes
-    return Image.open(BytesIO(image_bytes))
 
 
 def edit_image_with_gemini(
     client: genai.Client,
     image: Image.Image,
     prompt: str,
-    number_of_images: int = 1
+    number_of_images: int = 1,
+    model: str = DEFAULT_IMAGE_MODEL,
+    aspect_ratio: Optional[str] = None,
+    image_size: Optional[str] = None,
 ) -> List[Image.Image]:
     """
-    Edit an image using Gemini's native image generation model in chat mode.
-    
-    This uses gemini-3.1-flash-image-preview (Nano Banana 2) which can generate
-    and edit images in a conversational context.
-    
+    Edit an image: add, remove or modify elements, restyle, or regrade it.
+
     Args:
         client (genai.Client): An initialized Gemini API client
         image (Image.Image): PIL Image to edit
         prompt (str): Description of how to edit the image
         number_of_images (int): Number of variations to generate (1-4)
-    
+        model (str, optional): Defaults to Nano Banana 2.1.
+        aspect_ratio (str, optional): Leave unset to keep the source image's shape.
+        image_size (str, optional): "1K", "2K" or "4K".
+
     Returns:
         List[Image.Image]: List of edited PIL Images
     """
-    # Create a chat session for image editing using the latest model
-    chat = client.chats.create(model="gemini-3.1-flash-image-preview")
-    
-    # Send the image and edit prompt
-    response = chat.send_message([prompt, image])
-    
-    # Extract generated images from response
-    generated_images = []
-    for candidate in response.candidates:
-        for part in candidate.content.parts:
-            if part.inline_data:
-                generated_images.append(Image.open(BytesIO(part.inline_data.data)))
-    
-    return generated_images
+    return _run(
+        client,
+        model,
+        prompt,
+        images=[image],
+        aspect_ratio=aspect_ratio,
+        image_size=image_size,
+        number_of_images=number_of_images,
+    )
 
 
 def generate_with_reference_image(
@@ -184,43 +202,37 @@ def generate_with_reference_image(
     prompt: str,
     reference_image: Image.Image,
     aspect_ratio: str = "1:1",
-    number_of_images: int = 1
+    number_of_images: int = 1,
+    model: str = DEFAULT_IMAGE_MODEL,
 ) -> List[Image.Image]:
     """
-    Generate images using a reference image for style or content guidance.
-    
-    Uses Gemini's multimodal capabilities to analyze the reference image
-    and generate new images based on the prompt and reference style.
-    
+    Generate new images guided by a reference image's style and composition.
+
+    The reference is handed to the image model directly, so it sees the actual
+    pixels rather than a text description of them.
+
     Args:
         client (genai.Client): An initialized Gemini API client
         prompt (str): Text description of what to generate
         reference_image (Image.Image): Reference image for style/content guidance
         aspect_ratio (str): Aspect ratio for generated images
         number_of_images (int): Number of images to generate
-    
+        model (str, optional): Defaults to Nano Banana 2.1.
+
     Returns:
         List[Image.Image]: List of generated PIL Images
     """
-    # First, analyze the reference image using Gemini 3 Flash
-    analysis_response = client.models.generate_content(
-        model='gemini-3.5-flash',
-        contents=[
-            reference_image,
-            "Describe the style, composition, color palette, and key visual elements of this image for image generation guidance."
-        ]
+    guided_prompt = (
+        f"{prompt}\n\nUse the attached image as a reference for style, colour "
+        "palette and composition. Generate a new image; do not copy it."
     )
-    
-    # Enhance the prompt with the analysis
-    style_description = analysis_response.text.strip()
-    enhanced_prompt = f"{prompt}. Use the following style and composition: {style_description}"
-    
-    # Generate images with the enhanced prompt
-    return generate_image(
-        client=client,
-        prompt=enhanced_prompt,
+    return _run(
+        client,
+        model,
+        guided_prompt,
+        images=[reference_image],
         aspect_ratio=aspect_ratio,
-        number_of_images=number_of_images
+        number_of_images=number_of_images,
     )
 
 
@@ -230,24 +242,16 @@ def batch_generate_images(
     **kwargs
 ) -> List[List[Image.Image]]:
     """
-    Generate images for multiple prompts efficiently.
-    
+    Generate images for multiple prompts.
+
     Args:
         client (genai.Client): An initialized Gemini API client
         prompts (List[str]): List of prompts to generate images for
         **kwargs: Additional arguments to pass to generate_image()
-    
+
     Returns:
-        List[List[Image.Image]]: List of image lists, one per prompt
-    
-    Example:
-        >>> prompts = [
-        ...     "A sunset over mountains",
-        ...     "A busy city street at night",
-        ...     "A peaceful forest scene"
-        ... ]
-        >>> results = batch_generate_images(client, prompts, number_of_images=2)
-        >>> # results[0] contains 2 sunset images, results[1] contains 2 city images, etc.
+        List[List[Image.Image]]: List of image lists, one per prompt. A prompt
+        that fails yields an empty list rather than aborting the batch.
     """
     results = []
     for prompt in prompts:
@@ -257,137 +261,49 @@ def batch_generate_images(
         except Exception as e:
             print(f"Failed to generate images for prompt '{prompt}': {e}")
             results.append([])
-    
+
     return results
 
 
 # Usage Examples
 if __name__ == "__main__":
     from main import create_client
-    
+
     client = create_client()
-    
+
     try:
-        print("=" * 80)
-        print("IMAGE GENERATION EXAMPLES")
-        print("=" * 80)
-        
-        # Example 1: Basic image generation
-        print("\n1. Generating a single image...")
+        print("1. Generating a single image...")
         images = generate_image(client, "A futuristic AI research lab")
         images[0].save("basic_image.png")
-        print(f"✓ Saved basic_image.png")
-        
-        # Example 2: Multiple images with different aspect ratio
-        print("\n2. Generating multiple images with landscape aspect ratio...")
+        print("Saved basic_image.png")
+
+        print("2. Generating a 2K panorama...")
         images = generate_image(
             client,
             "A serene mountain landscape at sunset",
+            aspect_ratio="21:9",
+            image_size="2K",
+        )
+        images[0].save("landscape.png")
+        print("Saved landscape.png")
+
+        print("3. Editing an image...")
+        edited = edit_image_with_gemini(client, images[0], "Add a rainbow in the sky")
+        edited[0].save("edited_image.png")
+        print("Saved edited_image.png")
+
+        print("4. Generating from a reference image...")
+        referenced = generate_with_reference_image(
+            client,
+            "A quiet harbour town at dawn",
+            reference_image=images[0],
             aspect_ratio="16:9",
-            number_of_images=3
         )
-        for i, img in enumerate(images):
-            img.save(f"landscape_{i}.png")
-        print(f"✓ Saved {len(images)} landscape images")
-        
-        # Example 3: Using negative prompt
-        print("\n3. Generating with negative prompt...")
-        images = generate_image(
-            client,
-            "A beautiful garden",
-            negative_prompt="people, buildings, artificial structures",
-            number_of_images=1
-        )
-        images[0].save("garden_no_people.png")
-        print(f"✓ Saved garden_no_people.png")
-        
-        # Example 4: High-quality generation
-        print("\n4. Generating high-quality image...")
-        images = generate_image(
-            client,
-            "An ultra-detailed photograph of a butterfly",
-            model="imagen-4.0-generate-001",
-            output_mime_type="image/png"
-        )
-        images[0].save("butterfly_hq.png")
-        print(f"✓ Saved butterfly_hq.png")
-        
-        # Example 5: Batch generation
-        print("\n5. Batch generating images...")
-        prompts = [
-            "A red apple on a table",
-            "A blue ocean wave",
-            "A green forest path"
-        ]
-        batch_results = batch_generate_images(client, prompts)
-        for i, images in enumerate(batch_results):
-            if images:
-                images[0].save(f"batch_{i}.png")
-        print(f"✓ Saved {len(batch_results)} batch images")
-        
-        # Example 6: Image editing (if available)
-        print("\n6. Editing an image with Gemini...")
-        try:
-            original = images[0]  # Use image from previous step
-            edited = edit_image_with_gemini(
-                client,
-                original,
-                "Add a rainbow in the sky"
-            )
-            if edited:
-                edited[0].save("edited_image.png")
-                print(f"✓ Saved edited_image.png")
-        except Exception as e:
-            print(f"⚠ Image editing not available: {e}")
-        
-        # Example 7: Upscaling (Vertex AI only)
-        print("\n7. Upscaling an image (Vertex AI only)...")
-        try:
-            upscaled = upscale_image(client, images[0], upscale_factor="x2")
-            upscaled.save("upscaled_image.png")
-            print(f"✓ Saved upscaled_image.png")
-        except Exception as e:
-            print(f"⚠ Upscaling not available: {e}")
-        
-        print("\n" + "=" * 80)
-        print("All examples completed!")
-        print("=" * 80)
-        
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-    
+        referenced[0].save("reference_image.png")
+        print("Saved reference_image.png")
+
     finally:
         try:
             client.close()
         except Exception:
-            pass
-
-
-
-#     result = client.models.generate_images(
-#         model="imagen-4.0-fast-generate-001",
-#         prompt=prompt,
-#         config={
-#             'number_of_images': 1,
-#             'aspect_ratio': aspect_ratio,
-#             'person_generation': 'ALLOW_ADULT'
-#         }
-#     )
-
-#     image_bytes = result.generated_images[0].image.image_bytes 
-#     return Image.open(BytesIO(image_bytes))
-
-# # Usage 
-# if __name__ == "__main__":
-#     from main import create_client
-#     client = create_client()
-#     try:
-#         image = generate_image(client, "A futuristic AI research lab")
-#         image.save("generated_image.png")
-#     finally:
-#         try:
-#             client.close()
-#         except Exception:
-#             pass
+            pass

@@ -43,13 +43,12 @@ class TestCase(BaseModel):
 def generate_code(
     client: genai.Client, 
     requirements: str, 
-    model: str = "gemini-3.5-flash",
+    model: str = "gemini-3.8-flash",
     language: str = "python",
     style: str = "clean",
     include_tests: bool = False,
     include_comments: bool = True,
     max_complexity: str = "moderate",
-    temperature: float = 0.2,
     use_thinking: bool = True
 ) -> str:
     """
@@ -139,7 +138,7 @@ Output the code only, without additional explanations unless needed for setup.""
 def generate_code_structured(
     client: genai.Client,
     requirements: str,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> CodeOutput:
     """
     Generate code with structured output including metadata.
@@ -174,7 +173,6 @@ Also provide:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=CodeOutput,
-            temperature=0.2,
         )
     )
     
@@ -184,7 +182,7 @@ Also provide:
 def generate_code_streaming(
     client: genai.Client,
     requirements: str,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ):
     """
     Generate code with streaming output for real-time feedback.
@@ -214,7 +212,6 @@ Provide clean, well-documented code with error handling."""
         model=model,
         contents=prompt,
         config=types.GenerateContentConfig(
-            temperature=0.2,
             system_instruction="You are an expert Python developer."
         )
     )
@@ -227,7 +224,7 @@ Provide clean, well-documented code with error handling."""
 def review_code(
     client: genai.Client,
     code: str,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> CodeReview:
     """
     Review code and provide structured feedback.
@@ -267,7 +264,6 @@ Analyze for:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=CodeReview,
-            temperature=0.1,
         )
     )
     
@@ -278,7 +274,7 @@ def explain_code(
     client: genai.Client,
     code: str,
     detail_level: Literal["brief", "detailed", "line-by-line"] = "detailed",
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> str:
     """
     Generate an explanation of what code does.
@@ -312,7 +308,6 @@ def explain_code(
     response = gemini_generate(client, label="code",
         model=model,
         contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.3)
     )
     
     return response.text
@@ -322,7 +317,7 @@ def generate_tests(
     client: genai.Client,
     code: str,
     test_framework: str = "pytest",
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> List[TestCase]:
     """
     Generate unit tests for given code.
@@ -360,7 +355,6 @@ Return a JSON array of test cases."""
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=list[TestCase],
-            temperature=0.2,
         )
     )
     
@@ -372,7 +366,7 @@ def refactor_code(
     client: genai.Client,
     code: str,
     goals: List[str],
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> str:
     """
     Refactor code to meet specific goals.
@@ -409,7 +403,6 @@ Provide the refactored code with comments explaining major changes."""
     response = gemini_generate(client, label="code",
         model=model,
         contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.2)
     )
     
     return response.text
@@ -420,7 +413,7 @@ def convert_code(
     code: str,
     source_lang: str,
     target_lang: str,
-    model: str = "gemini-3.5-flash"
+    model: str = "gemini-3.8-flash"
 ) -> str:
     """
     Convert code from one programming language to another.
@@ -430,7 +423,7 @@ def convert_code(
         code (str): The code to convert
         source_lang (str): Source programming language
         target_lang (str): Target programming language
-        model (str, optional): Model to use. Defaults to "gemini-2.5-pro".
+        model (str, optional): Model to use. Defaults to "gemini-3.1-pro".
     
     Returns:
         str: Converted code
@@ -448,7 +441,6 @@ Maintain the same functionality and structure while following {target_lang} best
     response = gemini_generate(client, label="code",
         model=model,
         contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.2)
     )
     
     return response.text
@@ -597,7 +589,7 @@ def validate_syntax(code: str, language: str = "python") -> Dict[str, Any]:
 def generate_and_execute(
     client: genai.Client,
     requirements: str,
-    model: str = "gemini-3.5-flash",
+    model: str = "gemini-3.8-flash",
     auto_fix: bool = True,
     max_retries: int = 3
 ) -> Dict[str, Any]:
@@ -654,7 +646,6 @@ Fix the code and provide only the corrected version."""
             response = gemini_generate(client, label="code",
                 model=model,
                 contents=fix_prompt,
-                config=types.GenerateContentConfig(temperature=0.1)
             )
             code = response.text
             attempts += 1
@@ -685,7 +676,6 @@ Fix the code and provide only the corrected version."""
         response = gemini_generate(client, label="code",
             model=model,
             contents=fix_prompt,
-            config=types.GenerateContentConfig(temperature=0.1)
         )
         code = response.text
         attempts += 1

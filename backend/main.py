@@ -10,9 +10,9 @@ import json
 def create_client() -> genai.Client:
     return genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
 
-DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
 COMPLEX_MODEL = "gemini-3.1-pro-preview"
-LITE_MODEL = "gemini-3.1-flash-lite"
+LITE_MODEL = "gemini-3.5-flash-lite"
 EMBEDDING_MODEL = "gemini-embedding-001"
 
 # ============================================================================

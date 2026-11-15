@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -10,13 +10,16 @@ import {
   Select,
   SelectContent,
   SelectItem,
+  SelectGroup,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { apiClient } from "@/lib/api"
-import { Loader2, Volume2, Download, Mic, Users, Radio } from "lucide-react"
+import { apiClient, type TtsVoice } from "@/lib/api"
+import { Loader2, Volume2, Download, Mic, Users, Radio, AudioLines } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { GeminiLive } from "@/components/gemini-live"
+import { VoiceStudio } from "@/components/voice-studio"
 
 // 30 prebuilt voices (kept in sync with backend/speech_generation.py VOICES)
 const VOICES: Array<{ name: string; description: string }> = [
@@ -53,17 +56,17 @@ const VOICES: Array<{ name: string; description: string }> = [
 ]
 
 const MODELS: Array<{ id: string; label: string; streaming: boolean; multiSpeaker: boolean }> = [
-  { id: "gemini-3.8-flash-tts", label: "3.8 Flash TTS (Newest)", streaming: true, multiSpeaker: false },
-  { id: "gemini-3.8-flash-lite-tts", label: "3.8 Flash Lite TTS (Fastest)", streaming: true, multiSpeaker: false },
-  { id: "gemini-3.1-flash-tts-preview", label: "3.1 Flash TTS", streaming: true, multiSpeaker: true },
-  { id: "gemini-2.5-flash-preview-tts", label: "2.5 Flash TTS", streaming: false, multiSpeaker: true },
-  { id: "gemini-2.5-pro-preview-tts", label: "2.5 Pro TTS (Highest quality)", streaming: false, multiSpeaker: true },
+  { id: "gemini-3.8-flash-tts", label: "3.8 Flash TTS (Newest, highest fidelity)", streaming: true, multiSpeaker: true },
+  { id: "gemini-3.8-flash-lite-tts", label: "3.8 Flash Lite TTS (Fastest)", streaming: true, multiSpeaker: true },
+  // Deprecated: Google names 3.8 Flash-Lite as its replacement. Takes only the 30
+  // prebuilt voices below. (The 2.5 preview TTS models were removed; they shut down 2026-11-17.)
+  { id: "gemini-3.1-flash-tts-preview", label: "3.1 Flash TTS (Deprecated)", streaming: true, multiSpeaker: true },
 ]
+const DEPRECATED_MODELS = new Set(["gemini-3.1-flash-tts-preview"])
+const PREBUILT_NAMES = new Set(VOICES.map((v) => v.name))
 
-// The 3.8 models reject multi-speaker unless every text part carries
-// speech_metadata.speaker, which the installed SDK cannot send. Rather than
-// let someone pick a model that will 400, the conversation tab only offers
-// the models that work.
+// On 3.8 the backend splits the transcript into "Name: line" turns and sends
+// each with speech_metadata, so every model here handles conversations.
 const MULTI_SPEAKER_MODELS = MODELS.filter((m) => m.multiSpeaker)
 
 const LANGUAGES: Array<{ code: string; label: string }> = [
@@ -81,7 +84,10 @@ const LANGUAGES: Array<{ code: string; label: string }> = [
   { code: "ar-EG", label: "Arabic" },
 ]
 
-const STYLE_TAGS = ["[whispers]", "[excitedly]", "[laughs]", "[sighs]", "[shouting]", "Say cheerfully:"]
+// 3.8 speaks the text verbatim: inline tags are only for momentary vocal
+// events. Sustained delivery (emotion, pace, pitch) goes in the Style field or
+// a "(style)" line prefix instead.
+const VOCAL_TAGS = ["<short pause>", "<long pause>", "<breath>", "<sigh>", "<laugh>", "<gasp>", "<cough>"]
 
 interface SpeechResult {
   audioUrl: string
@@ -147,6 +153,7 @@ export default function SpeechPage() {
   const [voice, setVoice] = useState("Kore")
   const [model, setModel] = useState("gemini-3.8-flash-tts")
   const [language, setLanguage] = useState("")
+  const [speechStyle, setSpeechStyle] = useState("")
   const [streaming, setStreaming] = useState(true)
   const [streamProgress, setStreamProgress] = useState<{ chunks: number; seconds: number } | null>(null)
 
@@ -156,15 +163,57 @@ export default function SpeechPage() {
   const [speaker1Voice, setSpeaker1Voice] = useState("Kore")
   const [speaker2Name, setSpeaker2Name] = useState("Jane")
   const [speaker2Voice, setSpeaker2Voice] = useState("Puck")
-  const [multiModel, setMultiModel] = useState("gemini-3.1-flash-tts-preview")
+  const [multiModel, setMultiModel] = useState("gemini-3.8-flash-tts")
 
   // Shared state
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<SpeechResult | null>(null)
+  const [activeTab, setActiveTab] = useState("single")
 
-  const insertTag = (tag: string) => {
-    setPrompt((p) => (p ? `${tag} ${p}` : `${tag} `))
+  // Voices beyond the 30 prebuilt names: the project's designed/replicated
+  // voices, plus any library voices picked in the Voices tab this session.
+  const [customVoices, setCustomVoices] = useState<TtsVoice[]>([])
+  const [isLoadingCustom, setIsLoadingCustom] = useState(false)
+  const [customError, setCustomError] = useState<string | null>(null)
+  const [pickedLibraryVoices, setPickedLibraryVoices] = useState<TtsVoice[]>([])
+
+  const refreshCustomVoices = useCallback(async () => {
+    setIsLoadingCustom(true)
+    setCustomError(null)
+    try {
+      const res = await apiClient.listCustomVoices()
+      setCustomVoices(res.voices)
+    } catch (e: unknown) {
+      setCustomError(e instanceof Error ? e.message : "Could not load your voices")
+    } finally {
+      setIsLoadingCustom(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshCustomVoices()
+  }, [refreshCustomVoices])
+
+  const voiceLabel = (id: string) =>
+    customVoices.find((v) => v.id === id)?.display_name ??
+    pickedLibraryVoices.find((v) => v.id === id)?.display_name ??
+    id
+
+  // Library and custom voices only run on 3.8, so picking one moves a
+  // deprecated model selection forward.
+  const handleUseVoice = (picked: TtsVoice) => {
+    if (picked.type === "prebuilt" && !PREBUILT_NAMES.has(picked.id)) {
+      setPickedLibraryVoices((prev) => (prev.some((v) => v.id === picked.id) ? prev : [picked, ...prev]))
+    }
+    setVoice(picked.id)
+    if (!PREBUILT_NAMES.has(picked.id) && DEPRECATED_MODELS.has(model)) setModel("gemini-3.8-flash-tts")
+    setActiveTab("single")
+  }
+
+  // Vocal tags mark a moment, so they go where the writer has got to (the end).
+  const handleInsertTag = (tag: string) => {
+    setPrompt((p) => (p && !p.endsWith(" ") ? `${p} ${tag} ` : `${p}${tag} `))
   }
 
   const modelInfo = MODELS.find((m) => m.id === model)
@@ -184,7 +233,7 @@ export default function SpeechPage() {
         // produce a sequence of unplayable snippets.
         const chunks: string[] = []
         let bytes = 0
-        for await (const ev of apiClient.streamSpeech({ prompt, voice, model, language: lang })) {
+        for await (const ev of apiClient.streamSpeech({ prompt, voice, model, language: lang, style: speechStyle || undefined })) {
           if (ev.type === "audio") {
             chunks.push(ev.data)
             bytes += Math.floor((ev.data.length * 3) / 4)
@@ -200,16 +249,16 @@ export default function SpeechPage() {
           audioUrl: URL.createObjectURL(blob),
           mimeType: "audio/wav",
           modelUsed: model,
-          label: `${voice} · ${model} · streamed`,
+          label: `${voiceLabel(voice)} · ${model} · streamed`,
         })
       } else {
-        const res = await apiClient.generateSpeech({ prompt, voice, model, language: lang })
+        const res = await apiClient.generateSpeech({ prompt, voice, model, language: lang, style: speechStyle || undefined })
         const blob = base64ToBlob(res.audio_base64, res.mime_type)
         setResult({
           audioUrl: URL.createObjectURL(blob),
           mimeType: res.mime_type,
           modelUsed: res.model_used,
-          label: `${res.voice} · ${res.model_used}`,
+          label: `${voiceLabel(res.voice)} · ${res.model_used}`,
         })
       }
     } catch (e: unknown) {
@@ -261,12 +310,42 @@ export default function SpeechPage() {
       <SelectTrigger id={id}>
         <SelectValue />
       </SelectTrigger>
-      <SelectContent className="max-h-72">
-        {VOICES.map((v) => (
-          <SelectItem key={v.name} value={v.name}>
-            {v.name} <span className="text-zinc-400">— {v.description}</span>
-          </SelectItem>
-        ))}
+      <SelectContent className="max-h-80">
+        {customVoices.length > 0 && (
+          <SelectGroup>
+            <SelectLabel>My voices (3.8 only)</SelectLabel>
+            {customVoices.map((v) => (
+              <SelectItem key={v.id} value={v.id}>
+                {v.display_name || v.id}{" "}
+                <span className="text-zinc-400">— {v.type === "replicated" ? "Replicated" : "Designed"}</span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        )}
+        {pickedLibraryVoices.length > 0 && (
+          <SelectGroup>
+            <SelectLabel>From the library (3.8 only)</SelectLabel>
+            {pickedLibraryVoices.map((v) => (
+              <SelectItem key={v.id} value={v.id}>
+                {v.display_name || v.id} <span className="text-zinc-400">— {v.language_code ?? v.id}</span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        )}
+        <SelectGroup>
+          <SelectLabel>Prebuilt</SelectLabel>
+          {VOICES.map((v) => (
+            <SelectItem key={v.name} value={v.name}>
+              {v.name} <span className="text-zinc-400">— {v.description}</span>
+            </SelectItem>
+          ))}
+        </SelectGroup>
+        {/* Keep an id typed elsewhere (e.g. a voice still loading) selectable. */}
+        {!PREBUILT_NAMES.has(value) &&
+          !customVoices.some((v) => v.id === value) &&
+          !pickedLibraryVoices.some((v) => v.id === value) && (
+            <SelectItem value={value}>{value}</SelectItem>
+          )}
       </SelectContent>
     </Select>
   )
@@ -288,8 +367,8 @@ export default function SpeechPage() {
           <ThemeToggle />
         </div>
 
-        <Tabs defaultValue="single" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-3 max-w-xl">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
+          <TabsList className="grid w-full grid-cols-4 max-w-2xl">
             <TabsTrigger value="single">
               <Mic className="mr-2 h-4 w-4" />
               Single Speaker
@@ -297,6 +376,10 @@ export default function SpeechPage() {
             <TabsTrigger value="multi">
               <Users className="mr-2 h-4 w-4" />
               Multi-Speaker
+            </TabsTrigger>
+            <TabsTrigger value="voices">
+              <AudioLines className="mr-2 h-4 w-4" />
+              Voices
             </TabsTrigger>
             <TabsTrigger value="live">
               <Radio className="mr-2 h-4 w-4" />
@@ -310,23 +393,34 @@ export default function SpeechPage() {
               <CardHeader>
                 <CardTitle>Text to Speak</CardTitle>
                 <CardDescription>
-                  Steer style and emotion with natural language — e.g. &ldquo;Say cheerfully:&rdquo; or inline tags like [whispers].
+                  The text is spoken word for word. Set the delivery in Style, start a line with{" "}
+                  <code>(style)</code> to change it mid-script, and use tags only for momentary sounds and pauses.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <Textarea
-                  placeholder="Say cheerfully: Have a wonderful day!"
+                  placeholder={"(cold, measured) Be it so. <short pause>\n(bitter, sharp) Whom reason hath equalled, force hath made supreme."}
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   rows={5}
-                  className="resize-none"
+                  className="resize-none font-mono text-sm"
                 />
 
+                <div className="space-y-2">
+                  <label htmlFor="speech-style" className="text-sm font-medium">Style</label>
+                  <Input
+                    id="speech-style"
+                    placeholder="e.g. warm and friendly, speaking slowly"
+                    value={speechStyle}
+                    onChange={(e) => setSpeechStyle(e.target.value)}
+                  />
+                </div>
+
                 <div className="flex flex-wrap gap-1.5">
-                  {STYLE_TAGS.map((tag) => (
+                  {VOCAL_TAGS.map((tag) => (
                     <button
                       key={tag}
-                      onClick={() => insertTag(tag)}
+                      onClick={() => handleInsertTag(tag)}
                       className="text-xs font-mono px-2.5 py-1 rounded-full border border-zinc-200/50 dark:border-zinc-800/50 text-zinc-500 hover:text-indigo-500 hover:border-indigo-500/30 transition-colors"
                     >
                       {tag}
@@ -430,13 +524,14 @@ export default function SpeechPage() {
               <CardHeader>
                 <CardTitle>Conversation</CardTitle>
                 <CardDescription>
-                  Write a dialogue that names each speaker. Assign each speaker a distinct voice (up to 2 speakers).
+                  One line per turn as <code>Name: text</code>, with an optional direction like{" "}
+                  <code>Name (whispering): text</code>. Assign each speaker a distinct voice (up to 2 speakers).
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <Textarea
                   placeholder={
-                    "TTS the following conversation between Joe and Jane:\nJoe: How's it going today Jane?\nJane: Not too bad, how about you?"
+                    "Joe (cheerful): How's it going today Jane?\nJane (calm): Not too bad, how about you?"
                   }
                   value={convoPrompt}
                   onChange={(e) => setConvoPrompt(e.target.value)}
@@ -482,8 +577,8 @@ export default function SpeechPage() {
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    The 3.8 models are single-speaker only for now: they require a
-                    speaker tag on every text part, which the current SDK cannot send.
+                    On 3.8 each line is sent as its own turn, so speakers can use your designed, replicated
+                    or library voices.
                   </p>
                 </div>
 
@@ -506,6 +601,17 @@ export default function SpeechPage() {
                 </Button>
               </CardContent>
             </Card>
+          </TabsContent>
+
+          {/* ── Voices: custom voices, Voice design, Voice replication, library ── */}
+          <TabsContent value="voices" className="space-y-6">
+            <VoiceStudio
+              customVoices={customVoices}
+              isLoadingCustom={isLoadingCustom}
+              customError={customError}
+              onRefreshCustom={refreshCustomVoices}
+              onUseVoice={handleUseVoice}
+            />
           </TabsContent>
 
           {/* ── Gemini Live (real-time voice) ── */}

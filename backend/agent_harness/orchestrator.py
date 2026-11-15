@@ -44,8 +44,8 @@ def get_default_client() -> genai.Client:
 
 # ─── Models ──────────────────────────────────────────────────────────────────
 ORCHESTRATOR_MODEL = "gemini-3.1-pro-preview"  # Deep thinker / planner
-LEAD_MODEL         = "gemini-3.7-flash"         # Fast planner / delegator
-WORKER_MODEL       = "gemini-3.7-flash"         # Fast executor
+LEAD_MODEL         = "gemini-3.8-flash"         # Fast planner / delegator
+WORKER_MODEL       = "gemini-3.8-flash"         # Fast executor
 
 # ─── Thinking levels ─────────────────────────────────────────────────────────
 # Planners ran at HIGH, which put a full orch5 run at 3-6 minutes - too slow

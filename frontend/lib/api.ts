@@ -164,6 +164,7 @@ export interface SpeechModelInfo {
   id: string;
   streaming: boolean;
   multi_speaker: boolean;
+  deprecated: boolean;
 }
 
 export interface SpeechVoicesResponse {
@@ -172,9 +173,44 @@ export interface SpeechVoicesResponse {
   models: SpeechModelInfo[];
   defaults: { model: string; multi_speaker_model: string; voice: string };
   max_speakers: number;
+  consent_phrase: string;
   sample_rate: number;
   channels: number;
   multi_speaker_note: string;
+}
+
+/** A voice from the Voices API: a library ("prebuilt") voice, or a custom
+ *  voice made with Voice design ("prompted") or Voice replication ("replicated"). */
+export interface TtsVoice {
+  id: string;
+  type: "prebuilt" | "prompted" | "replicated";
+  display_name?: string;
+  description?: string;
+  /** The Voice design description, for prompted voices. */
+  prompt?: string;
+  gender?: string;
+  language_code?: string;
+  region_code?: string;
+  accent?: string;
+  persona?: string;
+  context?: string;
+  pitch?: string;
+  model?: string;
+  expire_time?: string;
+  /** Only on design responses and single-voice fetches. */
+  sample_audio_base64?: string;
+  sample_mime_type?: string;
+}
+
+export interface VoiceLibraryFilters {
+  type?: Array<TtsVoice["type"]>;
+  search?: string;
+  gender?: string;
+  language_code?: string;
+  accent?: string;
+  pitch?: string;
+  page_size?: number;
+  page_token?: string;
 }
 
 export class ApiError extends Error {
@@ -300,6 +336,13 @@ export interface TranscriptionResponse {
   filename: string;
 }
 
+/** A File keeps its own name; a recorded Blob gets one from its MIME type. */
+function fileNameFor(blob: Blob, stem: string): string {
+  if (blob instanceof File && blob.name) return blob.name;
+  const ext = blob.type.split("/")[1]?.split(";")[0] || "wav";
+  return `${stem}.${ext}`;
+}
+
 class ApiClient {
   private baseUrl: string;
 
@@ -382,8 +425,8 @@ class ApiClient {
     aspect_ratio?: string;
     model?: string;
     number_of_images?: number;
-    person_generation?: string;
     negative_prompt?: string;
+    image_size?: string;
   }): Promise<{ success: boolean; images: Array<{ index: number; data: string; format: string }>; count: number }> {
     return this.request("/images/generate", {
       method: "POST",
@@ -419,6 +462,7 @@ class ApiClient {
     aspect_ratio?: string;
     model?: string;
     number_of_images?: number;
+    image_size?: string;
   }): Promise<{
     success: boolean;
     results: Array<{ images: Array<{ index: number; data: string; format: string }>; count: number }>;
@@ -923,6 +967,9 @@ class ApiClient {
     model?: string;
     /** Optional BCP-47 code (e.g. "fr-FR"). Models auto-detect; this forces one. */
     language?: string;
+    /** Default delivery for the whole prompt, e.g. "cold, speaking slowly". 3.8 also
+     *  takes per-line "(style) text" overrides inside the prompt. */
+    style?: string;
   }): Promise<{
     success: boolean;
     audio_base64: string;
@@ -943,7 +990,7 @@ class ApiClient {
    *  not standalone WAV files - so collect them and call pcmChunksToWavBlob
    *  once rather than trying to play each one. */
   async *streamSpeech(
-    request: { prompt: string; voice?: string; model?: string; language?: string },
+    request: { prompt: string; voice?: string; model?: string; language?: string; style?: string },
     signal?: AbortSignal,
   ): AsyncGenerator<SpeechStreamEvent> {
     const response = await fetch(`${this.baseUrl}/speech/stream`, {
@@ -986,6 +1033,73 @@ class ApiClient {
 
   async getSpeechVoices(): Promise<SpeechVoicesResponse> {
     return this.request("/speech/voices");
+  }
+
+  /** One page of the Extended Voice Library (plus custom voices, newest first). */
+  async listVoiceLibrary(
+    filters: VoiceLibraryFilters = {},
+  ): Promise<{ success: boolean; voices: TtsVoice[]; next_page_token: string | null }> {
+    const params = new URLSearchParams();
+    if (filters.type?.length) params.set("type", filters.type.join(","));
+    for (const key of ["search", "gender", "language_code", "accent", "pitch", "page_token"] as const) {
+      const value = filters[key];
+      if (value) params.set(key, value);
+    }
+    if (filters.page_size) params.set("page_size", String(filters.page_size));
+    const query = params.toString();
+    return this.request(`/speech/voices/library${query ? `?${query}` : ""}`);
+  }
+
+  /** Every designed and replicated voice in the project. */
+  async listCustomVoices(): Promise<{ success: boolean; voices: TtsVoice[] }> {
+    return this.request("/speech/voices/custom");
+  }
+
+  /** A stored custom voice; designed voices include their sample audio. */
+  async getVoice(voiceId: string): Promise<{ success: boolean; voice: TtsVoice }> {
+    return this.request(`/speech/voices/${encodeURIComponent(voiceId)}`);
+  }
+
+  async deleteVoice(voiceId: string): Promise<{ success: boolean; deleted: string }> {
+    return this.request(`/speech/voices/${encodeURIComponent(voiceId)}`, { method: "DELETE" });
+  }
+
+  /** Voice design: create a stored voice from a description of its permanent traits. */
+  async designVoice(request: {
+    display_name: string;
+    description: string;
+    gender?: string;
+    language_code?: string;
+  }): Promise<{ success: boolean; voice: TtsVoice }> {
+    return this.request("/speech/voices/design", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+  }
+
+  /** Voice replication: needs 10-30 s of the speaker plus their spoken consent. */
+  async replicateVoice(request: {
+    display_name: string;
+    source_audio: Blob;
+    consent_audio: Blob;
+    consent_confirmed: boolean;
+  }): Promise<{ success: boolean; voice: TtsVoice }> {
+    const form = new FormData();
+    form.append("display_name", request.display_name);
+    form.append("consent_confirmed", String(request.consent_confirmed));
+    form.append("source_audio", request.source_audio, fileNameFor(request.source_audio, "source"));
+    form.append("consent_audio", request.consent_audio, fileNameFor(request.consent_audio, "consent"));
+    // Multipart, so skip request(): it forces a JSON content type.
+    const response = await fetch(`${this.baseUrl}/speech/voices/replicate`, {
+      method: "POST",
+      headers: { ...apiKeyHeader() },
+      body: form,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new ApiError(error.detail || `HTTP ${response.status}`, response.status);
+    }
+    return response.json();
   }
 
   async generateMultiSpeakerSpeech(request: {

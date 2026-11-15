@@ -28,6 +28,8 @@ import asyncio
 import logging
 from datetime import datetime
 import uuid
+
+logger = logging.getLogger("api_server")
 import re
 
 
@@ -119,6 +121,7 @@ from mega_agentic_system import (
 
 # Import additional modules
 from image_generation import (
+    DEFAULT_IMAGE_MODEL,
     generate_image,
     edit_image_with_gemini,
     generate_with_reference_image,
@@ -180,6 +183,15 @@ from speech_generation import (
     DEFAULT_TTS_MODEL,
     DEFAULT_MULTI_SPEAKER_MODEL,
     MAX_SPEAKERS as TTS_MAX_SPEAKERS,
+    DEPRECATED_TTS_MODELS,
+    CONSENT_PHRASE_EN,
+    MAX_VOICE_AUDIO_BYTES,
+    list_voices as tts_list_voices,
+    list_custom_voices as tts_list_custom_voices,
+    get_voice as tts_get_voice,
+    delete_voice as tts_delete_voice,
+    design_voice as tts_design_voice,
+    replicate_voice as tts_replicate_voice,
 )
 from csv_data_completion_tool import analyze_missing_data
 from build_scout_plan import ScoutPlanBuildOrchestrator
@@ -340,10 +352,10 @@ class ImageGenerateRequest(BaseModel):
     """Image generation request."""
     prompt: str
     aspect_ratio: str = "1:1"
-    model: str = "imagen-4.0-fast-generate-001"
+    model: str = DEFAULT_IMAGE_MODEL
     number_of_images: int = 1
-    person_generation: str = "ALLOW_ADULT"
     negative_prompt: Optional[str] = None
+    image_size: Optional[str] = None  # "1K" | "2K" | "4K"
 
 
 class DocumentGenerateRequest(BaseModel):
@@ -481,8 +493,9 @@ class ImageBatchGenerateRequest(BaseModel):
     """Request model for batch image generation."""
     prompts: List[str]
     aspect_ratio: str = "1:1"
-    model: str = "imagen-4.0-fast-generate-001"
+    model: str = DEFAULT_IMAGE_MODEL
     number_of_images: int = 1
+    image_size: Optional[str] = None  # "1K" | "2K" | "4K"
 
 
 # ============================================================================
@@ -974,7 +987,7 @@ def get_complexities():
 
 @app.post("/images/generate")
 def generate_image_endpoint(request: ImageGenerateRequest, ai_client: genai.Client = Depends(get_gemini_client)):
-    """Generate images using Imagen models."""
+    """Generate images using the Nano Banana models."""
     if not ai_client:
         raise HTTPException(status_code=503, detail="AI client not initialized")
     
@@ -985,8 +998,8 @@ def generate_image_endpoint(request: ImageGenerateRequest, ai_client: genai.Clie
             aspect_ratio=request.aspect_ratio,
             model=request.model,
             number_of_images=request.number_of_images,
-            person_generation=request.person_generation,
-            negative_prompt=request.negative_prompt
+            negative_prompt=request.negative_prompt,
+            image_size=request.image_size,
         )
         
         # Convert images to base64 for API response
@@ -1116,7 +1129,8 @@ def batch_generate_endpoint(request: ImageBatchGenerateRequest, ai_client: genai
             prompts=request.prompts,
             aspect_ratio=request.aspect_ratio,
             model=request.model,
-            number_of_images=request.number_of_images
+            number_of_images=request.number_of_images,
+            image_size=request.image_size,
         )
         
         # Convert all results to base64
@@ -2081,9 +2095,20 @@ async def music_realtime_ws(websocket: WebSocket):
 # ============================================================================
 
 class SpeechGenerateRequest(BaseModel):
-    prompt: str = Field(..., description="Text to speak; may include style direction in natural language")
-    voice: str = Field(default="Kore", description="Prebuilt voice name")
+    prompt: str = Field(
+        ...,
+        description="Text to speak. On 3.8 it is spoken verbatim: start a line with '(style)' to change delivery, "
+        "and use inline tags only for momentary sounds (<sigh>, <short pause>).",
+    )
+    voice: str = Field(
+        default="Kore",
+        description="Prebuilt voice name, or on 3.8 a voice library id (en-gb-storyteller-1) or custom voice_... id",
+    )
     model: str = Field(default=DEFAULT_TTS_MODEL, description="A Gemini TTS model id")
+    style: Optional[str] = Field(
+        default=None,
+        description="Default delivery for the whole prompt, e.g. 'cold and commanding, speaking slowly'",
+    )
     language: Optional[str] = Field(
         default=None,
         description="Optional BCP-47 code (e.g. fr-FR). The models auto-detect, so this only forces one.",
@@ -2092,18 +2117,20 @@ class SpeechGenerateRequest(BaseModel):
 
 class SpeakerVoice(BaseModel):
     speaker: str = Field(..., description="Speaker name (must match the prompt)")
-    voice: str = Field(..., description="Prebuilt voice name for this speaker")
+    voice: str = Field(..., description="Voice for this speaker: prebuilt name, library id or voice_... id (3.8)")
 
 
 class MultiSpeakerSpeechRequest(BaseModel):
-    prompt: str = Field(..., description="Conversation text that names each speaker")
+    prompt: str = Field(..., description="Conversation text, one 'Name: line' (or 'Name (style): line') per turn")
     speakers: List[SpeakerVoice] = Field(..., description="1-2 speaker/voice mappings")
-    model: str = Field(default="gemini-2.5-flash-preview-tts", description="A Gemini TTS model id")
+    model: str = Field(default=DEFAULT_MULTI_SPEAKER_MODEL, description="A Gemini TTS model id")
 
 
 @app.get("/speech/voices")
 def speech_voices_endpoint():
-    """List available prebuilt voices and TTS models."""
+    """The 30 classic prebuilt voices and the TTS models. The full Extended
+    Voice Library and custom voices come from /speech/voices/library and
+    /speech/voices/custom, which need the caller's key."""
     return {
         "success": True,
         "voices": [{"name": name, "description": desc} for name, desc in TTS_VOICES.items()],
@@ -2112,6 +2139,7 @@ def speech_voices_endpoint():
                 "id": model,
                 "streaming": model in TTS_STREAMING_MODELS,
                 "multi_speaker": model in TTS_MULTI_SPEAKER_MODELS,
+                "deprecated": model in DEPRECATED_TTS_MODELS,
             }
             for model in TTS_MODELS
         ],
@@ -2121,13 +2149,12 @@ def speech_voices_endpoint():
             "voice": "Kore",
         },
         "max_speakers": TTS_MAX_SPEAKERS,
+        "consent_phrase": CONSENT_PHRASE_EN,
         "sample_rate": 24000,
         "channels": 1,
-        # The 3.8 models reject multi-speaker unless every text part carries
-        # speech_metadata.speaker, which google-genai 2.6.0 cannot express.
         "multi_speaker_note": (
-            "The 3.8 models do not support multi-speaker through the current SDK; "
-            "use a 3.1 or 2.5 model for conversations."
+            "Write one line per turn as 'Name: text' or 'Name (style): text'. On the 3.8 "
+            "models the text is spoken verbatim, so keep directions in the parentheses."
         ),
     }
 
@@ -2142,6 +2169,7 @@ def speech_generate_endpoint(request: SpeechGenerateRequest, ai_client: genai.Cl
             model=request.model,
             language=request.language,
             client=ai_client,
+            style=request.style,
         )
         return {"success": True, **result}
     except ValueError as e:
@@ -2178,6 +2206,7 @@ def speech_stream_endpoint(
                 model=request.model,
                 language=request.language,
                 client=ai_client,
+                style=request.style,
             ):
                 yield f"data: {json.dumps(event)}\n\n"
         except ValueError as e:
@@ -2216,6 +2245,151 @@ def speech_generate_multi_endpoint(request: MultiSpeakerSpeechRequest, ai_client
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Voices: Extended Voice Library, Voice design, Voice replication ─────────
+
+class VoiceDesignRequest(BaseModel):
+    display_name: str = Field(..., min_length=1, max_length=200, description="Name shown in your voice list")
+    description: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="Permanent traits only: age, gender, pitch, timbre, texture, accent, pacing. 1-2 sentences.",
+    )
+    gender: Optional[str] = Field(default=None, description="female, male or neutral")
+    language_code: Optional[str] = Field(default=None, description="BCP-47, e.g. en-GB")
+    model: Optional[str] = Field(default=None, description="Leave unset for the API default voice creation model")
+
+
+def _voices_api_error(e: Exception) -> HTTPException:
+    if isinstance(e, ValueError):
+        return HTTPException(status_code=400, detail=str(e))
+    # client.voices raises its own APIStatusError family (NotFoundError, ...),
+    # which carry status_code rather than subclassing google.genai.errors.
+    status_code = getattr(e, "status_code", None)
+    if isinstance(status_code, int) and 400 <= status_code < 600:
+        return HTTPException(status_code=status_code if status_code < 500 else 502, detail=str(e))
+    if isinstance(e, ClientError):
+        code = getattr(e, "code", None)
+        status = code if isinstance(code, int) and 400 <= code < 500 else 400
+        return HTTPException(status_code=status, detail=str(e))
+    if isinstance(e, (ServerError, APIError)):
+        return HTTPException(status_code=502, detail=str(e))
+    logger.error(f"Voices API call failed: {e}", exc_info=True)
+    return HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/speech/voices/library")
+def speech_voice_library_endpoint(
+    type: Optional[str] = None,
+    search: Optional[str] = None,
+    gender: Optional[str] = None,
+    language_code: Optional[str] = None,
+    accent: Optional[str] = None,
+    pitch: Optional[str] = None,
+    page_size: int = 50,
+    page_token: Optional[str] = None,
+    ai_client: genai.Client = Depends(get_gemini_client),
+):
+    """One page of the Voices API. `type` is a comma list of prebuilt, prompted,
+    replicated. When paging, keep the same filters as the call that returned
+    the token."""
+    try:
+        types = [t.strip() for t in type.split(",") if t.strip()] if type else None
+        page = tts_list_voices(
+            ai_client,
+            types=types,
+            search=search,
+            gender=gender,
+            language_code=language_code,
+            accent=accent,
+            pitch=pitch,
+            page_size=page_size,
+            page_token=page_token,
+        )
+        return {"success": True, **page}
+    except Exception as e:
+        raise _voices_api_error(e)
+
+
+@app.get("/speech/voices/custom")
+def speech_custom_voices_endpoint(ai_client: genai.Client = Depends(get_gemini_client)):
+    """Every designed and replicated voice stored in the caller's project."""
+    try:
+        return {"success": True, "voices": tts_list_custom_voices(ai_client)}
+    except Exception as e:
+        raise _voices_api_error(e)
+
+
+@app.post("/speech/voices/design")
+def speech_design_voice_endpoint(request: VoiceDesignRequest, ai_client: genai.Client = Depends(get_gemini_client)):
+    """Create a stored voice from a description. Returns it with sample audio."""
+    try:
+        voice = tts_design_voice(
+            ai_client,
+            display_name=request.display_name,
+            description=request.description,
+            gender=request.gender,
+            language_code=request.language_code,
+            model=request.model,
+        )
+        return {"success": True, "voice": voice}
+    except Exception as e:
+        raise _voices_api_error(e)
+
+
+@app.post("/speech/voices/replicate")
+async def speech_replicate_voice_endpoint(
+    display_name: str = Form(...),
+    consent_confirmed: bool = Form(...),
+    source_audio: UploadFile = File(..., description="10-30 s of the speaker's natural speech"),
+    consent_audio: UploadFile = File(..., description="The same speaker reading the consent statement"),
+    model: Optional[str] = Form(default=None),
+    ai_client: genai.Client = Depends(get_gemini_client),
+):
+    """Replicate a real speaker's voice. The caller must confirm the speaker is
+    an adult who consented; Google also verifies the consent recording."""
+    if not consent_confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirm that the speaker is an adult who owns this voice and consented to replicating it.",
+        )
+    limit = MAX_VOICE_AUDIO_BYTES + 1
+    source = await source_audio.read(limit)
+    consent = await consent_audio.read(limit)
+    try:
+        voice = tts_replicate_voice(
+            ai_client,
+            display_name=display_name,
+            source_audio=source,
+            source_mime_type=source_audio.content_type or "",
+            consent_audio=consent,
+            consent_mime_type=consent_audio.content_type or "",
+            model=model,
+        )
+        return {"success": True, "voice": voice}
+    except Exception as e:
+        raise _voices_api_error(e)
+
+
+@app.get("/speech/voices/{voice_id}")
+def speech_get_voice_endpoint(voice_id: str, ai_client: genai.Client = Depends(get_gemini_client)):
+    """A stored custom voice; designed voices include their sample audio."""
+    try:
+        return {"success": True, "voice": tts_get_voice(ai_client, voice_id)}
+    except Exception as e:
+        raise _voices_api_error(e)
+
+
+@app.delete("/speech/voices/{voice_id}")
+def speech_delete_voice_endpoint(voice_id: str, ai_client: genai.Client = Depends(get_gemini_client)):
+    """Permanently delete a stored custom voice."""
+    try:
+        tts_delete_voice(ai_client, voice_id)
+        return {"success": True, "deleted": voice_id}
+    except Exception as e:
+        raise _voices_api_error(e)
 
 
 # ============================================================================

@@ -20,3 +20,23 @@ export const OMNI_DURATIONS = ["3", "4", "5", "6", "7", "8", "9", "10"] as const
 
 /** Input video is capped at 10s for editing and extension. */
 export const OMNI_MAX_INPUT_VIDEO_SECONDS = 10
+
+/**
+ * Explicit task hints for `generation_config.video_config.task`.
+ *
+ * Omni infers the mode from the prompt and inputs on its own, and Google
+ * recommends leaning on prompting because pinning the task "adds some
+ * constraints". So we only send it where inference is genuinely ambiguous:
+ * a source video plus text could be read as an edit, an extension, or mere
+ * video understanding. Pure text/image/reference generation is left to the
+ * model.
+ */
+export const OMNI_VIDEO_TASKS = [
+    "text_to_video",
+    "image_to_video",
+    "reference_to_video",
+    "edit",
+    "extend",
+] as const
+
+export type OmniVideoTask = (typeof OMNI_VIDEO_TASKS)[number]
