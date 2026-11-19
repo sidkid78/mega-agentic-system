@@ -48,6 +48,7 @@ export async function POST(req: NextRequest) {
             durationSeconds?: string | number
             images?: OmniMedia[]
             video?: OmniMedia
+            referenceVideos?: OmniMedia[]
             previousInteractionId?: string
             task?: string
         }
@@ -60,6 +61,7 @@ export async function POST(req: NextRequest) {
             durationSeconds,
             images = [],
             video,
+            referenceVideos = [],
             previousInteractionId,
         } = body
 
@@ -84,6 +86,7 @@ export async function POST(req: NextRequest) {
                 durationSeconds,
                 images,
                 video,
+                referenceVideos,
                 previousInteractionId,
                 task,
             }),

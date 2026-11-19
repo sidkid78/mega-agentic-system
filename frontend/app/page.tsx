@@ -84,6 +84,12 @@ export default function Home() {
               🎬 Video Generation
             </a>
             <a
+              href="/film"
+              className="px-4 py-2 rounded-lg glass-card border border-zinc-200/50 dark:border-zinc-800/50 hover:border-indigo-500/50 dark:hover:border-indigo-500/50 hover:scale-105 transition-all text-sm font-medium text-zinc-700 dark:text-zinc-300"
+            >
+              🎞️ Film Studio
+            </a>
+            <a
               href="/music"
               className="px-4 py-2 rounded-lg glass-card border border-zinc-200/50 dark:border-zinc-800/50 hover:border-indigo-500/50 dark:hover:border-indigo-500/50 hover:scale-105 transition-all text-sm font-medium text-zinc-700 dark:text-zinc-300"
             >

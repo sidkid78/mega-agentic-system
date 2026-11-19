@@ -12,14 +12,28 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select"
-import { Loader2, Video, Download, Upload, X, Plus, Wand2 } from "lucide-react"
+import { Loader2, Video, Download, Upload, X, Plus, Wand2, Clapperboard } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { apiKeyHeader } from "@/lib/api-key"
 import {
     OMNI_RESOLUTIONS,
     OMNI_DURATIONS,
+    OMNI_MIN_DURATION,
+    OMNI_MAX_DURATION,
     OMNI_MAX_INPUT_VIDEO_SECONDS,
 } from "@/lib/omni-video-options"
+import {
+    buildScenePrompt,
+    remainingExtensionSeconds,
+    sanitizeAssetName,
+    OMNI_MAX_EXTENDED_SECONDS,
+    SCENE_ASSET_ROLES,
+    SCENE_MAX_REFERENCE_IMAGES,
+    SCENE_MAX_REFERENCE_VIDEOS,
+    type SceneAsset,
+    type SceneAssetRole,
+    type SceneShot,
+} from "@/lib/omni-scene"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -700,6 +714,628 @@ function useVideoGeneration() {
     }
 }
 
+// ─── Scene Studio ─────────────────────────────────────────────────────────────
+
+// Builds multi-shot scenes from a cast (uploaded media with roles) and
+// timecoded shots. lib/omni-scene.ts turns that into Omni's tag syntax; this
+// component owns the editing UI and the 40s continuation chain.
+
+function newId(): string {
+    return Math.random().toString(36).slice(2, 10)
+}
+
+const ROLE_LABELS: Record<SceneAssetRole, string> = {
+    reference: "Reference",
+    first_frame: "First frame",
+    last_frame: "Last frame",
+}
+
+function CastEditor({
+    cast,
+    onChange,
+    isContinuation,
+}: {
+    cast: SceneAsset[]
+    onChange: (next: SceneAsset[]) => void
+    isContinuation: boolean
+}) {
+    const imageInputRef = useRef<HTMLInputElement>(null)
+    const videoInputRef = useRef<HTMLInputElement>(null)
+
+    const imageCount = cast.filter((a) => a.kind === "image").length
+    const videoCount = cast.filter((a) => a.kind === "video").length
+
+    const uniqueName = (base: string) => {
+        const taken = new Set(cast.map((a) => a.name.toLowerCase()))
+        let i = 1
+        while (taken.has(`${base}${i}`.toLowerCase())) i++
+        return `${base}${i}`
+    }
+
+    const handleAddImage = async (file: File) => {
+        const { base64, mimeType, preview } = await fileToBase64(file)
+        onChange([
+            ...cast,
+            {
+                id: newId(),
+                kind: "image",
+                name: uniqueName("Image"),
+                // References are the safe default; frames are opted into.
+                role: "reference",
+                base64,
+                mimeType,
+                preview,
+            },
+        ])
+    }
+
+    const handleAddVideo = (file: File) => {
+        const reader = new FileReader()
+        reader.onload = () => {
+            const base64 = (reader.result as string).split(",")[1]
+            onChange([
+                ...cast,
+                {
+                    id: newId(),
+                    kind: "video",
+                    name: uniqueName("Clip"),
+                    role: "reference",
+                    base64,
+                    mimeType: file.type || "video/mp4",
+                },
+            ])
+        }
+        reader.readAsDataURL(file)
+    }
+
+    const update = (id: string, patch: Partial<SceneAsset>) => {
+        onChange(
+            cast.map((a) => {
+                if (a.id === id) return { ...a, ...patch }
+                // Only one asset may hold each frame role.
+                if (patch.role && patch.role !== "reference" && a.role === patch.role) {
+                    return { ...a, role: "reference" }
+                }
+                return a
+            }),
+        )
+    }
+
+    return (
+        <div className="space-y-3">
+            <div className="flex items-center justify-between">
+                <label className="text-sm font-medium">Cast &amp; media</label>
+                <div className="flex gap-2">
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs"
+                        disabled={imageCount >= SCENE_MAX_REFERENCE_IMAGES + 2}
+                        onClick={() => imageInputRef.current?.click()}
+                    >
+                        <Plus className="mr-1 h-3 w-3" /> Image
+                    </Button>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs"
+                        disabled={videoCount >= SCENE_MAX_REFERENCE_VIDEOS}
+                        onClick={() => videoInputRef.current?.click()}
+                    >
+                        <Plus className="mr-1 h-3 w-3" /> Reference clip
+                    </Button>
+                </div>
+            </div>
+
+            {cast.length === 0 ? (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Optional. Add characters, props, style references or opening/closing frames,
+                    then mention them in shots as <code>@Name</code>.
+                </p>
+            ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {cast.map((a) => (
+                        <div
+                            key={a.id}
+                            className="flex gap-2 rounded-lg border border-zinc-200/50 dark:border-zinc-800/50 p-2"
+                        >
+                            {a.kind === "image" && a.preview ? (
+                                <img
+                                    src={a.preview}
+                                    alt={a.name}
+                                    className="h-16 w-16 shrink-0 rounded object-cover"
+                                />
+                            ) : (
+                                <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded bg-indigo-500/10">
+                                    <Video className="h-6 w-6 text-indigo-500" />
+                                </div>
+                            )}
+                            <div className="min-w-0 flex-1 space-y-1">
+                                <div className="flex items-center gap-1">
+                                    <span className="text-xs text-zinc-500">@</span>
+                                    <input
+                                        value={a.name}
+                                        onChange={(e) =>
+                                            update(a.id, { name: sanitizeAssetName(e.target.value) })
+                                        }
+                                        aria-label="Cast name"
+                                        className="h-7 w-full min-w-0 rounded border border-zinc-200 dark:border-zinc-700 bg-transparent px-1.5 text-xs"
+                                    />
+                                    <button
+                                        onClick={() => onChange(cast.filter((c) => c.id !== a.id))}
+                                        className="rounded-full p-1 hover:bg-red-500/20"
+                                        title="Remove"
+                                        aria-label={`Remove ${a.name}`}
+                                    >
+                                        <X className="h-3 w-3" />
+                                    </button>
+                                </div>
+                                {a.kind === "image" ? (
+                                    <Select
+                                        value={isContinuation ? "reference" : a.role}
+                                        onValueChange={(v) =>
+                                            update(a.id, { role: v as SceneAssetRole })
+                                        }
+                                        disabled={isContinuation}
+                                    >
+                                        <SelectTrigger className="h-7 text-xs">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {SCENE_ASSET_ROLES.map((r) => (
+                                                <SelectItem key={r} value={r}>
+                                                    {ROLE_LABELS[r]}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                ) : (
+                                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                                        Character / object reference ·{" "}
+                                        {((a.base64.length * 0.75) / 1024 / 1024).toFixed(1)} MB
+                                    </p>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={async (e) => {
+                    const file = e.target.files?.[0]
+                    e.target.value = ""
+                    if (file) await handleAddImage(file)
+                }}
+            />
+            <input
+                ref={videoInputRef}
+                type="file"
+                accept="video/mp4,video/*"
+                className="hidden"
+                onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    e.target.value = ""
+                    if (file) handleAddVideo(file)
+                }}
+            />
+        </div>
+    )
+}
+
+function ShotEditor({
+    shots,
+    onChange,
+    castNames,
+    maxSeconds,
+    timeHint,
+}: {
+    shots: SceneShot[]
+    onChange: (next: SceneShot[]) => void
+    castNames: string[]
+    maxSeconds: number
+    timeHint: string
+}) {
+    const update = (id: string, patch: Partial<SceneShot>) =>
+        onChange(shots.map((s) => (s.id === id ? { ...s, ...patch } : s)))
+
+    const handleAddShot = () => {
+        const lastEnd = shots.length ? Math.max(...shots.map((s) => s.end)) : 0
+        const start = Math.min(lastEnd, maxSeconds - 1)
+        onChange([
+            ...shots,
+            { id: newId(), start, end: Math.min(start + 3, maxSeconds), description: "" },
+        ])
+    }
+
+    const numberInput =
+        "h-7 w-14 rounded border border-zinc-200 dark:border-zinc-700 bg-transparent px-1.5 text-xs"
+
+    return (
+        <div className="space-y-2">
+            <div className="flex items-center justify-between">
+                <label className="text-sm font-medium">Shots</label>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={handleAddShot}
+                    disabled={shots.some((s) => s.end >= maxSeconds)}
+                >
+                    <Plus className="mr-1 h-3 w-3" /> Shot
+                </Button>
+            </div>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">{timeHint}</p>
+
+            {shots.map((s, i) => (
+                <div
+                    key={s.id}
+                    className="space-y-1.5 rounded-lg border border-zinc-200/50 dark:border-zinc-800/50 p-2"
+                >
+                    <div className="flex items-center gap-1.5 text-xs">
+                        <span className="font-medium text-zinc-600 dark:text-zinc-300">
+                            Shot {i + 1}
+                        </span>
+                        <input
+                            type="number"
+                            min={0}
+                            max={maxSeconds}
+                            value={s.start}
+                            onChange={(e) => update(s.id, { start: Number(e.target.value) })}
+                            aria-label={`Shot ${i + 1} start (seconds)`}
+                            className={numberInput}
+                        />
+                        <span>–</span>
+                        <input
+                            type="number"
+                            min={1}
+                            max={maxSeconds}
+                            value={s.end}
+                            onChange={(e) => update(s.id, { end: Number(e.target.value) })}
+                            aria-label={`Shot ${i + 1} end (seconds)`}
+                            className={numberInput}
+                        />
+                        <span className="text-zinc-500">s</span>
+                        <div className="flex-1" />
+                        {shots.length > 1 && (
+                            <button
+                                onClick={() => onChange(shots.filter((x) => x.id !== s.id))}
+                                className="rounded-full p-1 hover:bg-red-500/20"
+                                title="Remove shot"
+                                aria-label={`Remove shot ${i + 1}`}
+                            >
+                                <X className="h-3 w-3" />
+                            </button>
+                        )}
+                    </div>
+                    <Textarea
+                        value={s.description}
+                        onChange={(e) => update(s.id, { description: e.target.value })}
+                        placeholder={
+                            i === 0
+                                ? "Wide shot: @Image1 walks into a neon-lit diner, rain on the windows. Low jazz, rain hiss."
+                                : "Cut to a close-up of @Image1's hands sliding a photo across the counter."
+                        }
+                        rows={2}
+                        className="resize-none text-sm"
+                    />
+                    {castNames.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                            {castNames.map((n) => (
+                                <button
+                                    key={n}
+                                    onClick={() =>
+                                        update(s.id, {
+                                            description: `${s.description}${
+                                                s.description && !s.description.endsWith(" ") ? " " : ""
+                                            }@${n} `,
+                                        })
+                                    }
+                                    className="rounded-full border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 text-[11px] text-indigo-700 dark:text-indigo-300 hover:bg-indigo-500/20"
+                                >
+                                    @{n}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            ))}
+        </div>
+    )
+}
+
+/** Reads a clip's length from its metadata — an extension returns the full, longer video. */
+function useClipSeconds(result: VideoResult | null): number | null {
+    // Tagged with the result it was measured from, so a stale reading for a
+    // previous clip is never returned while the new one loads.
+    const [measured, setMeasured] = useState<{ of: VideoResult; seconds: number } | null>(null)
+    useEffect(() => {
+        if (!result) return
+        const url = URL.createObjectURL(videoBlob(result.videoBase64, result.mimeType))
+        const el = document.createElement("video")
+        el.preload = "metadata"
+        el.onloadedmetadata = () => {
+            if (Number.isFinite(el.duration)) setMeasured({ of: result, seconds: el.duration })
+        }
+        el.src = url
+        return () => URL.revokeObjectURL(url)
+    }, [result])
+    return measured && measured.of === result ? measured.seconds : null
+}
+
+function SceneStudio() {
+    const gen = useVideoGeneration()
+
+    const [cast, setCast] = useState<SceneAsset[]>([])
+    const [openingShots, setOpeningShots] = useState<SceneShot[]>([
+        { id: newId(), start: 0, end: 4, description: "" },
+        { id: newId(), start: 4, end: 8, description: "" },
+    ])
+    const [nextShots, setNextShots] = useState<SceneShot[]>([
+        { id: newId(), start: 0, end: 5, description: "" },
+    ])
+    const [direction, setDirection] = useState("")
+    const [isLoop, setIsLoop] = useState(false)
+    const [aspect, setAspect] = useState("16:9")
+    const [resolution, setResolution] = useState("720p")
+    const [duration, setDuration] = useState("8")
+    const [extDuration, setExtDuration] = useState("10")
+    const [mode, setMode] = useState<"opening" | "continue">("opening")
+    const [isPromptOpen, setIsPromptOpen] = useState(false)
+
+    const clipSeconds = useClipSeconds(gen.result)
+    const canContinue = Boolean(gen.interactionId)
+    const isContinuation = mode === "continue" && canContinue
+    const remaining = clipSeconds === null ? 10 : remainingExtensionSeconds(clipSeconds)
+
+    // Keep the extension length within what is left of the 40s budget: the
+    // picked value is clamped on read rather than rewritten in an effect.
+    const extOptions = useMemo(
+        () => OMNI_DURATIONS.filter((d) => Number(d) <= Math.max(remaining, OMNI_MIN_DURATION)),
+        [remaining],
+    )
+    const extSeconds = extOptions.includes(extDuration as (typeof OMNI_DURATIONS)[number])
+        ? extDuration
+        : extOptions[extOptions.length - 1]
+
+    const built = useMemo(
+        () =>
+            buildScenePrompt({
+                shots: isContinuation ? nextShots : openingShots,
+                cast,
+                direction,
+                loop: !isContinuation && isLoop,
+                isContinuation,
+            }),
+        [isContinuation, nextShots, openingShots, cast, direction, isLoop],
+    )
+
+    const shotsEnd = Math.max(
+        0,
+        ...(isContinuation ? nextShots : openingShots).map((s) => s.end),
+    )
+    const hasBlockingWarning = built.warnings.some(
+        (w) => w.startsWith("Add at least") || w.includes("ends before") || w.includes("needs a first frame"),
+    )
+    const isAtCeiling = isContinuation && remaining < OMNI_MIN_DURATION
+
+    const handleGenerate = () => {
+        if (hasBlockingWarning) return
+        const media = {
+            images: built.images,
+            ...(built.referenceVideos.length ? { referenceVideos: built.referenceVideos } : {}),
+        }
+        if (isContinuation) {
+            if (isAtCeiling) return
+            gen.generate({
+                prompt: built.prompt,
+                durationSeconds: extSeconds,
+                // Prompt + prior clip + references is ambiguous between
+                // extend and edit, so name the task.
+                task: "extend",
+                previousInteractionId: gen.interactionId,
+                ...media,
+            })
+            setNextShots([{ id: newId(), start: 0, end: 5, description: "" }])
+        } else {
+            gen.generate({
+                prompt: built.prompt,
+                aspectRatio: aspect,
+                resolution,
+                // Size the clip to the storyboard when it runs past the picker.
+                durationSeconds: String(
+                    Math.min(OMNI_MAX_DURATION, Math.max(Number(duration), shotsEnd)),
+                ),
+                ...media,
+            })
+        }
+    }
+
+    const castNames = cast.map((a) => a.name).filter(Boolean)
+
+    return (
+        <div className="grid gap-6 md:grid-cols-2">
+            <Card>
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                        <Clapperboard className="h-5 w-5" />
+                        Scene Studio
+                    </CardTitle>
+                    <CardDescription>
+                        Storyboard multi-shot scenes with a consistent cast, then keep the
+                        scene going — up to {OMNI_MAX_EXTENDED_SECONDS}s in total
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    {canContinue && (
+                        <div className="grid grid-cols-2 gap-1 rounded-lg bg-zinc-100 dark:bg-zinc-900 p-1">
+                            {(["opening", "continue"] as const).map((m) => (
+                                <button
+                                    key={m}
+                                    onClick={() => setMode(m)}
+                                    className={`rounded-md px-2 py-1.5 text-xs font-medium transition-colors ${
+                                        mode === m
+                                            ? "bg-white dark:bg-zinc-800 shadow-sm"
+                                            : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                                    }`}
+                                >
+                                    {m === "opening" ? "New opening clip" : "Continue selected clip"}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    <CastEditor cast={cast} onChange={setCast} isContinuation={isContinuation} />
+
+                    {isContinuation ? (
+                        <ShotEditor
+                            key="continue"
+                            shots={nextShots}
+                            onChange={setNextShots}
+                            castNames={castNames}
+                            maxSeconds={10}
+                            timeHint="0s is where the extension starts. Write a cut (e.g. “cut to a new scene with the same characters”) or let the action carry on."
+                        />
+                    ) : (
+                        <ShotEditor
+                            key="opening"
+                            shots={openingShots}
+                            onChange={setOpeningShots}
+                            castNames={castNames}
+                            maxSeconds={OMNI_MAX_DURATION}
+                            timeHint={`One clip holds up to ${OMNI_MAX_DURATION}s; each shot is a timecoded beat. Mention cast with @Name.`}
+                        />
+                    )}
+
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium">Direction (optional)</label>
+                        <Textarea
+                            value={direction}
+                            onChange={(e) => setDirection(e.target.value)}
+                            placeholder="Style, camera and audio for the whole scene, e.g. “35mm film grain, handheld. A slow synth score swells under the dialogue.”"
+                            rows={2}
+                            className="resize-none text-sm"
+                        />
+                    </div>
+
+                    {isContinuation ? (
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium">Extension length</label>
+                            <Select value={extSeconds} onValueChange={setExtDuration}>
+                                <SelectTrigger>
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {extOptions.map((d) => (
+                                        <SelectItem key={d} value={d}>
+                                            +{d} seconds
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                                {clipSeconds !== null
+                                    ? `Selected clip is ${clipSeconds.toFixed(1)}s — ${remaining.toFixed(0)}s left before the ${OMNI_MAX_EXTENDED_SECONDS}s limit.`
+                                    : `Extensions add up to 10s, to ${OMNI_MAX_EXTENDED_SECONDS}s in total.`}
+                            </p>
+                        </div>
+                    ) : (
+                        <>
+                            <VideoConfigPanel
+                                aspectRatio={aspect}
+                                onAspectRatioChange={setAspect}
+                                resolution={resolution}
+                                onResolutionChange={setResolution}
+                                durationSeconds={duration}
+                                onDurationChange={setDuration}
+                            />
+                            <label className="flex items-center gap-2 text-sm">
+                                <input
+                                    type="checkbox"
+                                    checked={isLoop}
+                                    onChange={(e) => setIsLoop(e.target.checked)}
+                                    className="h-4 w-4 accent-indigo-500"
+                                />
+                                Seamless loop (the first frame is also the last)
+                            </label>
+                        </>
+                    )}
+
+                    {built.warnings.length > 0 && (
+                        <ul className="space-y-0.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400 list-disc list-inside">
+                            {built.warnings.map((w) => (
+                                <li key={w}>{w}</li>
+                            ))}
+                        </ul>
+                    )}
+
+                    <div className="rounded-lg border border-zinc-200/50 dark:border-zinc-800/50">
+                        <button
+                            onClick={() => setIsPromptOpen((v) => !v)}
+                            className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-300"
+                            aria-expanded={isPromptOpen}
+                        >
+                            Prompt sent to Omni
+                            <span>{isPromptOpen ? "Hide" : "Show"}</span>
+                        </button>
+                        {isPromptOpen && (
+                            <pre className="max-h-56 overflow-auto whitespace-pre-wrap border-t border-zinc-200/50 dark:border-zinc-800/50 px-3 py-2 text-[11px] leading-relaxed text-zinc-700 dark:text-zinc-300">
+                                {built.prompt || "(empty)"}
+                            </pre>
+                        )}
+                    </div>
+
+                    <Button
+                        onClick={handleGenerate}
+                        disabled={gen.isLoading || hasBlockingWarning || isAtCeiling}
+                        className="w-full pulse-glow"
+                    >
+                        {gen.isLoading ? (
+                            <>
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                {isContinuation ? "Extending scene…" : "Shooting scene…"}
+                            </>
+                        ) : isContinuation ? (
+                            <>
+                                <Plus className="mr-2 h-4 w-4" />
+                                {isAtCeiling
+                                    ? `Reached the ${OMNI_MAX_EXTENDED_SECONDS}s limit`
+                                    : `Continue scene (+${extSeconds}s)`}
+                            </>
+                        ) : (
+                            <>
+                                <Clapperboard className="mr-2 h-4 w-4" />
+                                Generate Scene
+                            </>
+                        )}
+                    </Button>
+
+                    {gen.error && (
+                        <div className="rounded-lg bg-red-500/20 border border-red-500/30 p-4">
+                            <p className="text-sm text-red-900 dark:text-red-100">{gen.error}</p>
+                        </div>
+                    )}
+                </CardContent>
+            </Card>
+            <VideoOutput
+                result={gen.result}
+                isLoading={gen.isLoading}
+                statusMsg={gen.statusMsg}
+                error={gen.error}
+                tabKey="scene"
+                turns={gen.turns}
+                activeTurn={gen.activeTurn}
+                onSelectTurn={gen.selectTurn}
+                onRefine={gen.refine}
+            />
+        </div>
+    )
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function VideosPage() {
@@ -878,13 +1514,20 @@ export default function VideosPage() {
                             <span className="px-3 py-1 rounded-full bg-fuchsia-500/20 border border-fuchsia-500/50 text-xs font-semibold text-fuchsia-600 dark:text-fuchsia-400">
                                 ✨ CONVERSATIONAL EDITING
                             </span>
+                            <a
+                                href="/film"
+                                className="px-3 py-1 rounded-full bg-amber-500/20 border border-amber-500/50 text-xs font-semibold text-amber-700 dark:text-amber-400 hover:bg-amber-500/30"
+                            >
+                                🎞️ FILM STUDIO: SCRIPT → STORYBOARD → SHOOT
+                            </a>
                         </div>
                     </div>
                     <ThemeToggle />
                 </div>
 
                 <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-                    <TabsList className="grid w-full grid-cols-3 md:grid-cols-6">
+                    <TabsList className="grid h-auto w-full grid-cols-3 md:grid-cols-7">
+                        <TabsTrigger value="scene">🎬 Scene Studio</TabsTrigger>
                         <TabsTrigger value="text">Text → Video</TabsTrigger>
                         <TabsTrigger value="image">Image → Video</TabsTrigger>
                         <TabsTrigger value="reference">Reference Images</TabsTrigger>
@@ -892,6 +1535,12 @@ export default function VideosPage() {
                         <TabsTrigger value="extend">Extend Video</TabsTrigger>
                         <TabsTrigger value="omni">Edit ✨ Omni</TabsTrigger>
                     </TabsList>
+
+                    {/* ── Scene Studio: multi-shot storyboards + 40s continuation ── */}
+                    {/* forceMount keeps the cast, shots and clip chain when switching tabs. */}
+                    <TabsContent value="scene" forceMount className="data-[state=inactive]:hidden">
+                        <SceneStudio />
+                    </TabsContent>
 
                     {/* ── Text-to-Video ── */}
                     <TabsContent value="text">
@@ -1266,7 +1915,10 @@ export default function VideosPage() {
                                                 Any uploaded clip works, up to {OMNI_MAX_INPUT_VIDEO_SECONDS}s
                                                 — it need not have been generated here
                                             </li>
-                                            <li>Each pass adds 3–10s; run it again to keep extending</li>
+                                            <li>
+                                                Each pass adds up to 10s, to {OMNI_MAX_EXTENDED_SECONDS}s
+                                                in total; Omni uses the last 10s as context
+                                            </li>
                                             <li>
                                                 Video-to-video is region-restricted (unavailable in the EEA, UK,
                                                 Switzerland and some US states)

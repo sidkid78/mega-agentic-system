@@ -42,6 +42,11 @@ export interface OmniVideoRequest {
     images?: OmniMedia[]
     /** A clip to edit or extend — uploaded via the Files API, since Omni takes video by uri. */
     video?: OmniMedia
+    /**
+     * Character/object reference clips, addressed in the prompt as
+     * `<VIDEO_REF_N>`. Sent after any source video, in order.
+     */
+    referenceVideos?: OmniMedia[]
     /** A prior interaction to continue, for turn-by-turn refinement. */
     previousInteractionId?: string
     /**
@@ -113,7 +118,8 @@ async function uploadVideoAndWait(media: OmniMedia, ai: GoogleGenAI) {
  * Starts a background Omni interaction and returns its id.
  *
  * Input order matters: images first (first frame, then last frame when
- * interpolating), then any source video, then the text prompt.
+ * interpolating, then references), then any source video, then reference
+ * videos, then the text prompt.
  */
 export async function startOmniVideo(
     ai: GoogleGenAI,
@@ -128,6 +134,14 @@ export async function startOmniVideo(
 
     if (req.video) {
         const { uri, mimeType } = await uploadVideoAndWait(req.video, ai)
+        input.push({ type: "video", uri, mime_type: mimeType })
+    }
+
+    // Uploaded in parallel, pushed in order so <VIDEO_REF_N> lines up.
+    const refs = await Promise.all(
+        (req.referenceVideos ?? []).map((v) => uploadVideoAndWait(v, ai)),
+    )
+    for (const { uri, mimeType } of refs) {
         input.push({ type: "video", uri, mime_type: mimeType })
     }
 

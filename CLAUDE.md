@@ -52,6 +52,7 @@ Cross-module knowledge: `api_server.py` imports concrete functions from each fea
 Next.js App Router under `frontend/app/`:
 - `app/page.tsx` — main dashboard (Dashboard / Tasks / Metrics tabs).
 - Feature routes: `app/code/`, `app/documents/`, `app/images/`, `app/research/`, `app/workflows/` — each is a single `page.tsx` that calls the corresponding `/code`, `/documents`, etc. backend endpoints via `lib/api.ts`.
+- `app/film/` — Film Studio (Script → Assets → Storyboard → Shoot), entirely in Next.js: `/api/film/breakdown` and `/api/film/storyboard` (structured JSON on `gemini-3.8-flash`), Nano Banana for asset and frame images, Omni for one clip per scene via `lib/omni-scene.ts`. Project persists in IndexedDB (`lib/film/store.ts`); tabs live in `components/film/`. Omni takes no voice input, so characters with a `voiceId` get their lines dubbed afterwards: `/api/film/dub` speaks them on `gemini-3.8-flash-tts` and mixes them over the clip at shot timecodes with ffmpeg (needs ffmpeg/ffprobe on PATH; not Vercel-serverless). Named voice presets come from `NEXT_PUBLIC_FILM_VOICES` in `.env.local` (`lib/film/voices.ts`).
 - `lib/api.ts` is the single API client; all typed request/response shapes live there. Base URL comes from `NEXT_PUBLIC_API_URL`.
 - `components/ui/` is shadcn/ui-style primitives; feature components (`task-form`, `task-list`, `task-detail`, `metrics-dashboard`, `workflow-*`) sit at `components/` root. Dark mode via `next-themes`.
 
